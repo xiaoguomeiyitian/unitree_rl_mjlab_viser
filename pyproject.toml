@@ -1,0 +1,47 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "unitree_rl_mjlab_viser"
+version = "0.1.0"
+description = "Viser-based browser visualization for unitree_rl_mjlab training and simulation"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+authors = [
+    { name = "Unitree RL Mjlab Viser Contributors" }
+]
+keywords = ["reinforcement-learning", "robotics", "mujoco", "viser", "unitree"]
+
+# 核心依赖: 复用上游 unitree_rl_mjlab + mjlab, 不在 mjlab 内部改动
+dependencies = [
+    "viser>=0.2.0",
+    "tyro>=0.9.0",
+    "torch>=2.0",
+    "numpy",
+    # 上游以 editable 模式安装到环境里 (见 README 安装步骤)
+    "unitree_rl_mjlab @ file:///${PROJECT_ROOT}/../unitree_rl_mjlab",
+    "mjlab==1.2.0",
+    "mujoco-warp==3.5.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-asyncio>=0.21",
+]
+
+[project.scripts]
+unitree-viser = "unitree_viser.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["unitree_viser*"]
+
+[tool.setuptools.package-data]
+unitree_viser = ["py.typed"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-v --tb=short"
