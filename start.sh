@@ -304,31 +304,34 @@ run_cmd() {
             exec "$PYTHON_BIN" -m unitree_viser.cli sim-args $CMD_ARGS
             ;;
         list)
-            # 优先用任务注册表 API;失败时 grep Python 文件作为备用
-            if ! "$PYTHON_BIN" -c "
-import sys
-sys.path.insert(0, '$SIBLING_RL_DIR/src')
-import mjlab.tasks
-import src.tasks
-from mjlab.tasks.registry import list_tasks
-tasks = list_tasks()
-print(f'\\n可用任务 ({len(tasks)} 个):\\n')
-for i, t in enumerate(tasks, 1):
-    print(f'  {i:3d}. {t}')
-print()
-" 2>/dev/null; then
-                # 备用: 离线扫描兄弟项目,列出所有 unitree_<robot>_* 任务
-                log_warn "任务注册表加载失败 (常见原因: mjlab 1.2.0 需要 Python 3.12)"
-                log_warn "切换到离线扫描模式..."
+            # 使用统一的 scan_tasks (注册表 → 离线扫描 → 硬编码)
+            scan_tasks
+            sort_tasks_by_category
+            if [ ${#TASK_ARRAY[@]} -eq 0 ]; then
+                log_error "未发现任何任务"
+            else
                 echo ""
-                if [ -d "$SIBLING_RL_DIR/src/tasks" ]; then
-                    # 找所有 task ID: <robot>_<task>_<terrain>[_no_state_estimation]
-                    find "$SIBLING_RL_DIR/src/tasks" -name "env_cfgs.py" -path "*/config/*" \
-                        | sed -E 's|.*/config/([^/]+)/env_cfgs.py|\1|' \
-                        | sort -u | head -50
-                else
-                    log_error "找不到 $SIBLING_RL_DIR/src/tasks"
-                fi
+                log_banner "═══ 可用任务 (共 ${#TASK_ARRAY[@]} 个) ═══"
+                local num=0
+                local current_cat=""
+                for t in "${TASK_ARRAY[@]}"; do
+                    local cat=$(get_task_category "$t")
+                    if [ "$cat" != "$current_cat" ]; then
+                        current_cat="$cat"
+                        echo ""
+                        case "$cat" in
+                            velocity) echo -e "  ${BOLD}${CYAN}▼ 速度控制 (velocity)${NC} — 基座速度命令 (vx/vy/wz)" ;;
+                            tracking) echo -e "  ${BOLD}${CYAN}▼ 运动跟踪 (tracking)${NC} — 参考 motion 复现" ;;
+                        esac
+                    fi
+                    num=$((num+1))
+                    # 编号 + 任务ID (固定列宽) + 中文标签
+                    # 注意: printf %-Ns 按字节算,中文会偏,这里用纯 ASCII ID 算宽度 OK
+                    printf "  %2d. ${BOLD}%-50s${NC}  ${CYAN}%s${NC}\n" "$num" "$t" "$(get_task_label "$t")"
+                done
+                echo ""
+                log_info "tracking 任务需提供 --motion-file (e.g. dance.npz)"
+                log_info "选择任务: 跑 './start.sh' 走交互式菜单 (2级选择)"
             fi
             ;;
         test)
@@ -410,48 +413,193 @@ select_mode() {
     log_info "已选择: $MODE"
 }
 
-# 列出可用任务,让用户选择 (或回退到手动输入)
-select_task() {
-    log_info "正在加载任务列表..."
+# ── 任务扫描 ──────────────────────────────────────────────────────────────
+# 优先级:
+#   1. mjlab Python 注册表 (--list-tasks)    ← 完整但需要 warp+torch
+#   2. 离线 grep task_id="..." from __init__.py  ← 离线/快速
+#   3. 硬编码兜底列表
+# 输出: 写入全局 TASK_ARRAY
+scan_tasks() {
+    TASK_ARRAY=()
     local tasks=""
+
+    # 1. Python 注册表
     if tasks=$("$PYTHON_BIN" -c "
 import sys
 sys.path.insert(0, '$SIBLING_RL_DIR/src')
-import mjlab.tasks
-import src.tasks
+import mjlab.tasks  # noqa
+import src.tasks  # noqa
 from mjlab.tasks.registry import list_tasks
-for t in list_tasks(): print(t)
+for t in sorted(list_tasks()): print(t)
 " 2>/dev/null) && [ -n "$tasks" ]; then
-        local task_array=()
-        while IFS= read -r t; do task_array+=("$t"); done <<< "$tasks"
-        if [ ${#task_array[@]} -eq 0 ]; then
-            log_warn "未发现任何任务,使用手动输入"
-            TASK=$(prompt_input "请输入任务 ID (e.g. Unitree-G1-Flat)" "" true)
+        log_info "✓ 通过 Python 注册表加载 (${tasks//$'\n'/ | }) "
+        while IFS= read -r t; do TASK_ARRAY+=("$t"); done <<< "$tasks"
+        return
+    fi
+
+    # 2. 离线 grep __init__.py 中的 task_id
+    if [ -d "$SIBLING_RL_DIR/src/tasks" ]; then
+        tasks=$(grep -rhE '^\s*task_id="Unitree-[^"]+"' "$SIBLING_RL_DIR/src/tasks" 2>/dev/null \
+                | sed -E 's/.*task_id="(Unitree-[^"]+)".*/\1/' \
+                | sort -u)
+        if [ -n "$tasks" ]; then
+            log_info "✓ 离线扫描到 ${tasks//$'\n'/ | } "
+            while IFS= read -r t; do TASK_ARRAY+=("$t"); done <<< "$tasks"
             return
         fi
-        # 验证 --task 指定
-        if [ -n "$TASK" ]; then
-            if printf '%s\n' "${task_array[@]}" | grep -qx "$TASK"; then
-                log_info "使用指定任务: $TASK"
-                return
-            else
-                log_warn "任务 '$TASK' 不存在, 请重新选择"
-            fi
-        fi
-        local idx=$(prompt_select "请选择任务 (共 ${#task_array[@]} 个):" "${task_array[@]}")
-        TASK="${task_array[$idx]}"
-        log_info "已选择任务: $TASK"
-    else
-        # 回退: 手动输入
-        log_warn "无法加载任务注册表 (常见原因: mjlab 1.2.0 需要 Python 3.12)"
-        log_info "已知任务示例:"
-        echo "  • Unitree-Go2-Flat / Unitree-Go2-Rough"
-        echo "  • Unitree-G1-Flat / Unitree-G1-Rough"
-        echo "  • Unitree-G1-Tracking-No-State-Estimation"
-        echo ""
-        TASK=$(prompt_input "请手动输入任务 ID" "" true)
-        log_info "已选择任务: $TASK"
     fi
+
+    # 3. 硬编码兜底
+    log_warn "使用内置任务列表 (兄弟项目不可访问)"
+    TASK_ARRAY=(
+        "Unitree-Go2-Flat"      "Unitree-Go2-Rough"
+        "Unitree-G1-Flat"       "Unitree-G1-Rough"
+        "Unitree-G1-23Dof-Flat" "Unitree-G1-23Dof-Rough"
+        "Unitree-G1-Tracking"   "Unitree-G1-Tracking-No-State-Estimation"
+        "Unitree-G1-23Dof-Tracking" "Unitree-G1-23Dof-Tracking-No-State-Estimation"
+        "Unitree-H1_2-Flat"     "Unitree-H1_2-Rough"
+        "Unitree-H2-Flat"       "Unitree-H2-Rough"
+        "Unitree-A2-Flat"       "Unitree-A2-Rough"
+        "Unitree-As2-Flat"      "Unitree-As2-Rough"
+        "Unitree-R1-Flat"       "Unitree-R1-Rough"
+    )
+}
+
+# ── 任务元数据 (中文标签 + 分类) ───────────────────────────────────────────
+# 任务分类: velocity (速度控制) / tracking (运动跟踪)
+get_task_category() {
+    case "$1" in
+        *-Tracking*) echo "tracking" ;;
+        *)           echo "velocity" ;;
+    esac
+}
+
+# 分类中文名
+get_category_label() {
+    case "$1" in
+        velocity) echo "速度控制" ;;
+        tracking) echo "运动跟踪" ;;
+        *)        echo "$1" ;;
+    esac
+}
+
+# 任务 ID → 中文标签 (例如 "Go2 四足 · 平坦地形")
+get_task_label() {
+    local id="$1"
+    local rest="${id#Unitree-}"
+    local terrain=""
+    case "$rest" in
+        *-Tracking-No-State-Estimation) terrain="运动跟踪(无状态估计)"; rest="${rest%-Tracking-No-State-Estimation}" ;;
+        *-Tracking)                     terrain="运动跟踪";              rest="${rest%-Tracking}" ;;
+        *-Flat)                          terrain="平坦地形";              rest="${rest%-Flat}" ;;
+        *-Rough)                         terrain="崎岖地形";              rest="${rest%-Rough}" ;;
+    esac
+    local robot_cn
+    case "$rest" in
+        A2)        robot_cn="A2 四足" ;;
+        As2)       robot_cn="As2 四足" ;;
+        G1)        robot_cn="G1 人形(29Dof)" ;;
+        G1-23Dof)  robot_cn="G1 人形(23Dof)" ;;
+        Go2)       robot_cn="Go2 四足" ;;
+        Go2W)      robot_cn="Go2W 轮足" ;;
+        H1)        robot_cn="H1 人形" ;;
+        H1_2)      robot_cn="H1-2 人形" ;;
+        H2)        robot_cn="H2 人形" ;;
+        R1)        robot_cn="R1 人形" ;;
+        *)         robot_cn="$rest" ;;
+    esac
+    if [ -z "$terrain" ]; then
+        echo "$robot_cn"
+    else
+        echo "$robot_cn · $terrain"
+    fi
+}
+
+# 把 TASK_ARRAY 排序: velocity 在前, tracking 在后
+sort_tasks_by_category() {
+    local velocity_list=() tracking_list=()
+    for t in "${TASK_ARRAY[@]}"; do
+        case "$(get_task_category "$t")" in
+            velocity) velocity_list+=("$t") ;;
+            tracking) tracking_list+=("$t") ;;
+        esac
+    done
+    TASK_ARRAY=("${velocity_list[@]}" "${tracking_list[@]}")
+}
+
+# 二级任务菜单: 先选类别, 再选具体任务 (附中文说明)
+select_task() {
+    log_info "正在加载任务列表..."
+    scan_tasks
+    if [ ${#TASK_ARRAY[@]} -eq 0 ]; then
+        log_error "未发现任何任务"; exit 1
+    fi
+    sort_tasks_by_category
+    log_info "共 ${#TASK_ARRAY[@]} 个任务 (速度 $(( $(printf '%s\n' "${TASK_ARRAY[@]}" | grep -vc -- '-Tracking') )) 个 + 跟踪 4 个)"
+
+    # 验证 --task 指定
+    if [ -n "$TASK" ]; then
+        if printf '%s\n' "${TASK_ARRAY[@]}" | grep -qx "$TASK"; then
+            log_info "使用指定任务: $TASK ($(get_task_label "$TASK"))"
+            return
+        else
+            log_warn "任务 '$TASK' 不在列表, 将让重新选择"
+            TASK=""
+        fi
+    fi
+
+    # 一级: 选类别
+    local num_velocity=0 num_tracking=0
+    for t in "${TASK_ARRAY[@]}"; do
+        case "$(get_task_category "$t")" in
+            velocity) num_velocity=$((num_velocity+1)) ;;
+            tracking) num_tracking=$((num_tracking+1)) ;;
+        esac
+    done
+
+    local cat_opts=()
+    [ "$num_velocity" -gt 0 ] && cat_opts+=("velocity — 速度控制 / 基座 vx·vy·wz 命令 (${num_velocity} 个)")
+    [ "$num_tracking" -gt 0 ] && cat_opts+=("tracking — 运动跟踪 / 参考 motion 复现 (${num_tracking} 个)")
+    cat_opts+=("all      — 列出全部 ${#TASK_ARRAY[@]} 个任务 (不分类别)")
+    cat_opts+=("custom   — 手动输入任务 ID...")
+
+    echo ""
+    local cat_idx=$(prompt_select "请选择任务类别:" "${cat_opts[@]}")
+    local total_cats=${#cat_opts[@]}
+    local all_idx=$((total_cats - 2))
+    local custom_idx=$((total_cats - 1))
+
+    case $cat_idx in
+        "$all_idx")
+            _select_task_from_list "全部" "${TASK_ARRAY[@]}"
+            ;;
+        "$custom_idx")
+            TASK=$(prompt_input "请输入任务 ID (e.g. Unitree-G1-Flat)" "" true)
+            ;;
+        *)
+            local cat="${cat_opts[$cat_idx]%% *}"
+            local cat_label=$(get_category_label "$cat")
+            local filtered=()
+            for t in "${TASK_ARRAY[@]}"; do
+                [ "$(get_task_category "$t")" = "$cat" ] && filtered+=("$t")
+            done
+            _select_task_from_list "$cat_label" "${filtered[@]}"
+            ;;
+    esac
+    log_info "已选择任务: $TASK ($(get_task_label "$TASK"))"
+}
+
+# 内部: 从指定列表里选一个 (附中文标签)
+_select_task_from_list() {
+    local title="$1"; shift
+    local tasks=("$@")
+    echo ""
+    local opts=()
+    for t in "${tasks[@]}"; do
+        opts+=("$t  —  $(get_task_label "$t")")
+    done
+    local idx=$(prompt_select "请选择 $title 任务 (共 ${#tasks[@]} 个):" "${opts[@]}")
+    TASK="${tasks[$idx]}"
 }
 
 config_train() {
@@ -678,9 +826,16 @@ else
     if [ "$MODE" = "train" ] || [ "$MODE" = "sim" ]; then
         if [ -z "$TASK" ]; then
             log_error "train/sim 模式需要任务 ID: $0 $MODE <TaskID> [args]"
+            log_info "可用任务列表: $0 list"
             show_usage; exit 1
         fi
         check_task_registry
+        # 校验 task ID 是否在已知列表里 (不阻断, 仅警告)
+        scan_tasks
+        if [ ${#TASK_ARRAY[@]} -gt 0 ] && ! printf '%s\n' "${TASK_ARRAY[@]}" | grep -qx "$TASK"; then
+            log_warn "任务 '$TASK' 不在已知列表 (共 ${#TASK_ARRAY[@]} 个)"
+            log_warn "如不确定, 跑 '$0 list' 查看或去掉 <TaskID> 参数走交互菜单"
+        fi
     fi
     confirm_and_start
     run_cmd
