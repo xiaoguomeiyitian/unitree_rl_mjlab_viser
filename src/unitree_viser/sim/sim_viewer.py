@@ -3,15 +3,24 @@
 与 mjlab 自带的 ``ViserPlayViewer`` 不同, SimViewer:
 
 - **不**继承 play/pause/step 按钮 (用户已在 sim 模式, 持续 stepping)
-- **支持**命令注入 (从 Viser GUI 控制 vx/vy/wz)
+- **支持**命令注入 — 两路:
+  - GUI: Viser GUI 滑块 → CommandInjector → vel_command_b
+  - DDS: 订阅 rt/{robot_key}/wirelesscontroller → DdsCommandInjector → vel_command_b
 - **支持**加载训练好的策略 (checkpoint) 或用 random/zero policy
 - **单环境** (num_envs=1, 仿真不需要 batch)
 
 用法::
 
+    # GUI 注入 (默认)
     viewer = SimViewer(env=env, policy=policy, port=20006)
     viewer.setup()
     viewer.run()
+
+    # DDS 注入 (用 unitree_remote_ctrl 的 Web 遥控器)
+    viewer = SimViewer(
+        env=env, policy=policy, port=20006,
+        command_source="dds", robot_key="go2_0",
+    )
 """
 
 from __future__ import annotations
@@ -104,14 +113,24 @@ class SimViewer:
         env_idx: int = 0,
         inject_commands: bool = True,
         command_name: str = "twist",
+        command_source: str = "gui",
+        dds_domain: int = 0,
+        dds_interface: str = "lo",
+        robot_key: str = "go2_0",
+        dds_timeout: float = 0.5,
     ) -> None:
         """Args:
             env: ``ManagerBasedRlEnv`` (通常用 ``env.unwrapped``)
             policy: 可调用对象; ``None`` 表示 zero policy
             port: Viser HTTP/WS 端口
             env_idx: 显示的环境索引
-            inject_commands: 是否启用命令注入 GUI
+            inject_commands: 是否启用命令注入 GUI (仅 command_source 包含 gui 时有效)
             command_name: 命令 term 名称 (默认 ``twist``)
+            command_source: ``gui``/``dds``/``both`` — 决定哪些注入器生效
+            dds_domain: CycloneDDS 域 ID (与遥控器端一致)
+            dds_interface: DDS 网络接口 (``lo``=本机, ``enp*``=以太网)
+            robot_key: DDS topic 后缀, 订阅 ``rt/{robot_key}/wirelesscontroller``
+            dds_timeout: DDS 消息超时秒数, 超时归零
         """
         self._env = env
         # 包装 policy, 强制输出形状 (n, num_actions)
@@ -126,12 +145,25 @@ class SimViewer:
 
         self._server: viser.ViserServer | None = None
         self._scene: Any = None
-        self._injector: CommandInjector | None = None
+        # 注入器: 兼容两种类型 (GUI 滑块 / DDS 遥控器)
+        self._injector_gui: CommandInjector | None = None
+        self._injector_dds: Any = None  # DdsCommandInjector (运行时导入)
 
         self._should_stop = False
         self._step_count = 0
         self._inject_commands = inject_commands
         self._command_name = command_name
+
+        # ── 命令注入源配置 ──
+        if command_source not in ("gui", "dds", "both"):
+            raise ValueError(
+                f"command_source must be 'gui', 'dds', or 'both'; got {command_source!r}"
+            )
+        self._command_source = command_source
+        self._dds_domain = dds_domain
+        self._dds_interface = dds_interface
+        self._robot_key = robot_key
+        self._dds_timeout = dds_timeout
 
     def setup(self) -> None:
         """初始化 Viser 服务器 + 场景 + 注入器."""
@@ -152,16 +184,37 @@ class SimViewer:
             camera_elevation=20.0,
         )
 
-        if self._inject_commands:
+        # ── GUI 注入器 (command_source 包含 "gui") ──
+        if self._inject_commands and self._command_source in ("gui", "both"):
             try:
-                self._injector = CommandInjector(
+                self._injector_gui = CommandInjector(
                     server=self._server,
                     env=self._env,
                     command_name=self._command_name,
                 )
             except ValueError as e:
-                print(f"[SIM] 跳过命令注入: {e}")
-                self._injector = None
+                print(f"[SIM] 跳过 GUI 命令注入: {e}")
+                self._injector_gui = None
+
+        # ── DDS 注入器 (command_source 包含 "dds") ──
+        if self._command_source in ("dds", "both"):
+            try:
+                from unitree_viser.sim.dds_command_injection import (
+                    DdsCommandInjector,
+                )
+                self._injector_dds = DdsCommandInjector(
+                    server=self._server,
+                    env=self._env,
+                    command_name=self._command_name,
+                    dds_domain=self._dds_domain,
+                    dds_interface=self._dds_interface,
+                    robot_key=self._robot_key,
+                    timeout_s=self._dds_timeout,
+                )
+                self._injector_dds.start()
+            except (ValueError, ImportError) as e:
+                print(f"[SIM] 跳过 DDS 命令注入: {e}")
+                self._injector_dds = None
 
         # 仿真控制 GUI
         self._build_sim_control_gui()
@@ -223,8 +276,10 @@ class SimViewer:
                 with torch.inference_mode():
                     actions = self._policy(obs)
 
-                if self._injector is not None:
-                    self._injector.inject()
+                if self._injector_gui is not None:
+                    self._injector_gui.inject()
+                if self._injector_dds is not None:
+                    self._injector_dds.inject()
 
                 obs, reward, terminated, truncated, extras = self._env.step(actions)
                 self._step_count += 1

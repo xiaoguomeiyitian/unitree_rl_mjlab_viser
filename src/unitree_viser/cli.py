@@ -177,8 +177,14 @@ def run_train(args: TrainArgs) -> None:
     agent_cfg = load_rl_cfg(args.task)
     runner_cls_base = load_runner_cls(args.task)
 
+    # mjlab 1.2.0+ 返回 dataclass, 但 MjlabOnPolicyRunner/RslRl 期望 dict
+    # (上游 train.py 也是用 asdict 转换)
+    from dataclasses import asdict
+    agent_cfg = asdict(agent_cfg)
+
     if args.num_envs is not None:
         env_cfg.scene.num_envs = args.num_envs
+    # agent_cfg 现在是 dict
     if args.max_iterations is not None:
         agent_cfg["max_iterations"] = args.max_iterations
     if args.seed is not None:
@@ -272,6 +278,22 @@ class SimArgs:
     command_name: str = "twist"
     """命令 term 名称"""
 
+    # ── 命令注入源 (Viser GUI vs DDS 遥控器) ──
+    command_source: Literal["gui", "dds", "both"] = "gui"
+    """命令注入源:
+       - ``gui`` (默认): 用 Viser GUI 滑块手动设置 vx/vy/wz
+       - ``dds``: 用 DDS 遥控器 (订阅 ``rt/{robot_key}/wirelesscontroller``)
+       - ``both``: 同时启用, ``dds`` 消息优先, GUI 滑块作为断连回退
+    """
+    dds_domain: int = 0
+    """CycloneDDS 域 ID (与遥控器端一致, 默认 0)"""
+    dds_interface: str = "lo"
+    """CycloneDDS 网络接口 (``lo``=本机回环, ``enp*``=以太网)"""
+    robot_key: str = "go2_0"
+    """DDS topic 后缀, 订阅 ``rt/{robot_key}/wirelesscontroller``"""
+    dds_timeout: float = 0.5
+    """DDS 消息超时 (秒), 超时后归零; 设 0 禁用"""
+
     max_steps: int | None = None
     """最多多少步 (None = 无限, 直到用户 Quit)"""
 
@@ -321,14 +343,53 @@ def run_sim(args: SimArgs) -> None:
     # 启动 Viser
     if args.headless:
         print("[SIM] Headless 模式: 不启动 Viser")
+        # 即使 headless, 也允许 DDS 命令源生效 (用于 CI 集成测试)
+        dds_injector = None
+        if args.command_source in ("dds", "both"):
+            try:
+                from unitree_viser.sim.dds_command_injection import (
+                    DdsCommandInjector,
+                )
+                dds_injector = DdsCommandInjector(
+                    server=None,
+                    env=env,
+                    command_name=args.command_name,
+                    dds_domain=args.dds_domain,
+                    dds_interface=args.dds_interface,
+                    robot_key=args.robot_key,
+                    timeout_s=args.dds_timeout,
+                )
+                dds_injector.start()
+                print(
+                    f"[SIM-DDS] 已订阅: {dds_injector._topic} "
+                    f"(domain={args.dds_domain}, interface={args.dds_interface})"
+                )
+            except Exception as e:
+                print(f"[SIM] 跳过 DDS 命令注入: {e}")
+                dds_injector = None
+
         # 简单 step 循环
         obs, _ = env.reset()
-        for i in range(args.max_steps or 100):
-            with torch.inference_mode():
-                actions = policy(obs)
-            obs, _, _, _, _ = env.step(actions)
-            if i % 10 == 0:
-                print(f"[SIM] step {i}")
+        try:
+            for i in range(args.max_steps or 100):
+                with torch.inference_mode():
+                    actions = policy(obs)
+                if dds_injector is not None:
+                    dds_injector.inject()
+                obs, _, _, _, _ = env.step(actions)
+                if i % 10 == 0:
+                    pending = (
+                        dds_injector.get_pending() if dds_injector else None
+                    )
+                    cmd_str = (
+                        f" cmd=({pending['vx']:.2f},{pending['vy']:.2f},{pending['wz']:.2f})"
+                        if pending is not None
+                        else ""
+                    )
+                    print(f"[SIM] step {i}{cmd_str}")
+        finally:
+            if dds_injector is not None:
+                dds_injector.stop()
         return
 
     from unitree_viser.sim.sim_viewer import SimViewer
@@ -340,6 +401,11 @@ def run_sim(args: SimArgs) -> None:
         env_idx=args.viser_env_idx,
         inject_commands=args.inject_commands,
         command_name=args.command_name,
+        command_source=args.command_source,
+        dds_domain=args.dds_domain,
+        dds_interface=args.dds_interface,
+        robot_key=args.robot_key,
+        dds_timeout=args.dds_timeout,
     )
     viewer.setup()
     try:

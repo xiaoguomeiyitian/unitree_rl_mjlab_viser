@@ -111,7 +111,7 @@ class ViserRunner:
             start_time = time.time()
 
             # ── Rollout (原版) ──
-            with torch.inference_mode():
+            with _torch.inference_mode():
                 for _ in range(self.cfg["num_steps_per_env"]):
                     actions = self.alg.act(obs)
                     obs, rewards, dones, extras = self.env.step(actions.to(self.env.device))

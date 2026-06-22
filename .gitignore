@@ -27,3 +27,6 @@ htmlcov/
 *.swp
 *.swo
 .DS_Store
+logs
+wandb
+.venv

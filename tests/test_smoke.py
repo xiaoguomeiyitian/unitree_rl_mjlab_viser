@@ -95,6 +95,26 @@ def test_command_injector_class():
     print("✓ CommandInjector: inject + get_pending API present")
 
 
+def test_dds_command_injector_class():
+    """DdsCommandInjector 类 (不实例化, 避免依赖 viser + unitree_sdk2py)."""
+    from unitree_viser.sim.dds_command_injection import DdsCommandInjector
+
+    # 必须的方法
+    for method in ("start", "inject", "get_pending", "stop"):
+        assert hasattr(DdsCommandInjector, method), f"missing {method}"
+
+    # 私有方法: 摇杆 → 速度换算
+    inst = DdsCommandInjector.__new__(DdsCommandInjector)  # 不调 __init__
+    vx, vy, yaw = inst._axis_to_vel(lx=0.0, ly=1.0, rx=0.0)
+    assert vx == 1.0, f"vx should be 1.0 (ly), got {vx}"
+    vx, vy, yaw = inst._axis_to_vel(lx=0.5, ly=0.0, rx=0.0)
+    assert vy == -0.5, f"vy should be -0.5 (-lx), got {vy}"
+    vx, vy, yaw = inst._axis_to_vel(lx=0.0, ly=0.0, rx=0.5)
+    assert yaw == -0.5, f"yaw should be -0.5 (-rx), got {yaw}"
+
+    print("✓ DdsCommandInjector: axis→velocity conversion correct (vx=ly, vy=-lx, yaw=-rx)")
+
+
 def test_sim_viewer_module():
     """sim_viewer 模块 (需要 torch + viser)."""
     torch, err = _try_import("torch")
@@ -229,6 +249,7 @@ def main() -> None:
         test_train_module_api,
         test_training_controller_class,
         test_command_injector_class,
+        test_dds_command_injector_class,
         test_sim_viewer_module,
         test_cli_apis,
         test_render_viser_setup,

@@ -62,6 +62,13 @@ INJECT_COMMANDS="true"
 COMMAND_NAME="twist"
 MAX_STEPS=""
 
+# sim 命令注入源 (DDS 遥控器集成)
+COMMAND_SOURCE="gui"   # gui | dds | both
+DDS_DOMAIN="0"
+DDS_INTERFACE="lo"
+ROBOT_KEY="go2_0"      # 决定订阅 rt/{robot_key}/wirelesscontroller
+DDS_TIMEOUT="0.5"      # 秒; 超时后归零
+
 # deps 专用
 DEPS_INSTALL="false"
 DEPS_FULL="false"      # 是否装重型依赖 (torch + mjlab + mujoco-warp)
@@ -285,6 +292,16 @@ show_usage() {
   --max-steps <N>          最大步数 (默认无限)
   --command-name <name>    命令 term 名称 (默认 twist)
 
+DDS 命令注入 (unitree_remote_ctrl 集成):
+  --command-source {gui,dds,both}    命令注入源 (默认 gui)
+                                       gui  - Viser 浏览器滑块
+                                       dds  - 订阅 rt/{robot_key}/wirelesscontroller
+                                       both - 同时启用, dds 优先
+  --dds-domain <N>         CycloneDDS 域 ID (默认 0)
+  --dds-interface <name>   DDS 网络接口 (默认 lo, 跨机用 enp*)
+  --robot-key <key>        DDS topic 后缀 (默认 go2_0)
+  --dds-timeout <sec>      DDS 消息超时 (默认 0.5s, 超时归零)
+
 依赖参数 (deps):
   --install                自动 pip install 缺失依赖
   --full                   装完整重型依赖 (torch + mjlab + mujoco-warp, ~3GB)
@@ -336,6 +353,12 @@ build_cmd() {
             # tyro 的 inject_commands: bool=True, 配套 --no-inject-commands
             [ "${INJECT_COMMANDS:-true}" = "false" ] && CMD_ARGS="$CMD_ARGS --no-inject-commands"
             _opt command-name "$COMMAND_NAME"
+            # DDS 命令注入源 (unitree_remote_ctrl 集成)
+            _opt command-source "$COMMAND_SOURCE"
+            _opt dds-domain "$DDS_DOMAIN"
+            _opt dds-interface "$DDS_INTERFACE"
+            _opt robot-key "$ROBOT_KEY"
+            _opt dds-timeout "$DDS_TIMEOUT"
             _opt max-steps "$MAX_STEPS"
             ;;
         list)   CMD_ARGS="" ;;
@@ -821,7 +844,11 @@ confirm_and_start() {
             echo -e "  环境数:     ${BOLD}${NUM_ENVS_SIM}${NC}"
             echo -e "  Viser:      ${BOLD}$([ "$HEADLESS" = "true" ] && echo "禁用" || echo "http://localhost:$VISER_PORT")${NC}"
             if [ "$INJECT_COMMANDS" = "true" ] && [ "$HEADLESS" != "true" ]; then
-                echo -e "  命令注入:   ${BOLD}启用${NC}"
+                echo -e "  命令注入:   ${BOLD}启用${NC} (${COMMAND_NAME})"
+            fi
+            # 显示 DDS 配置
+            if [ "$COMMAND_SOURCE" != "gui" ] && [ "$COMMAND_SOURCE" != "" ]; then
+                echo -e "  DDS 注入:   ${BOLD}启用${NC} (${COMMAND_SOURCE}, key=${ROBOT_KEY}, domain=${DDS_DOMAIN})"
             fi
             if [ -n "$MAX_STEPS" ]; then
                 echo -e "  最大步数:   ${BOLD}${MAX_STEPS}${NC}"
@@ -910,6 +937,12 @@ else
             --no-inject-commands) INJECT_COMMANDS="false"; shift 1 ;;
             --inject-commands)  INJECT_COMMANDS="true"; shift 1 ;;
             --command-name)     COMMAND_NAME="$2"; shift 2 ;;
+            # DDS 命令注入
+            --command-source)   COMMAND_SOURCE="$2"; shift 2 ;;
+            --dds-domain)       DDS_DOMAIN="$2"; shift 2 ;;
+            --dds-interface)    DDS_INTERFACE="$2"; shift 2 ;;
+            --robot-key)        ROBOT_KEY="$2"; shift 2 ;;
+            --dds-timeout)      DDS_TIMEOUT="$2"; shift 2 ;;
             --max-steps)        MAX_STEPS="$2"; shift 2 ;;
             # deps
             --install)          DEPS_INSTALL="true"; shift 1 ;;
