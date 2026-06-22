@@ -52,7 +52,6 @@ class ViserRunner:
     而是在 ``ViserRunner.learn()`` 里复制一份原版循环, 加上 on_iter 钩子.
     """
 
-    # 由调用方注入
     viser_gui_state: dict | None = None
     training_controller: "TrainingController | None" = None
     """可选的训练控制器 (暂停/单步/速度). 注入后才生效."""
@@ -80,7 +79,6 @@ class ViserRunner:
         1. 每个 iter 结束后调用 ``_post_iter_hook``
         2. 暂停/单步控制
         """
-        # 初始化 NaN 检查函数
         try:
             from mjlab.utils.torch import check_nan
         except ImportError:
@@ -204,18 +202,11 @@ class ViserRunner:
         if self.viser_gui_state is None:
             return
 
-        # 取 render 线程的 FPS (如果有)
-        current_fps = None
-        render_thread = self.viser_gui_state.get("render_thread")
-        if render_thread is not None and hasattr(render_thread, "_render_loop"):
-            # 简单估算: 用最近 1 秒的计数
-            current_fps = self._sample_render_fps()
-
         update_training_info(
             self.viser_gui_state,
             iteration=iteration,
             mean_reward=mean_reward,
-            current_fps=current_fps,
+            current_fps=None,
         )
         push_reward_to_plot(
             self.viser_gui_state,
@@ -223,23 +214,6 @@ class ViserRunner:
             mean_reward=mean_reward,
             episode_length=episode_length,
         )
-
-    # ── FPS 估算 ────────────────────────────────────────────────────────────
-
-    _fps_sample: list[float] | None = None
-
-    def _sample_render_fps(self) -> float | None:
-        """估算后台渲染线程的 FPS."""
-        if self._fps_sample is None:
-            return None
-        now = time.time()
-        self._fps_sample.append(now)
-        # 保留最近 1 秒
-        while self._fps_sample and now - self._fps_sample[0] > 1.0:
-            self._fps_sample.pop(0)
-        if len(self._fps_sample) < 2:
-            return None
-        return (len(self._fps_sample) - 1) / (self._fps_sample[-1] - self._fps_sample[0])
 
 
 # ── 工厂: 构造带 Viser 能力的 Runner ───────────────────────────────────────

@@ -31,17 +31,7 @@ echo -e "  剩余参数: ${YELLOW}$*${NC}"
 echo ""
 
 cd "$PROJECT_ROOT"
-
-# 决定 Viser 端口
-PORT=20006
-EXTRA_ARGS=()
-for arg in "$@"; do
-    if [[ "$arg" == "--viser-port" ]]; then
-        shift; PORT="$1"; shift
-    fi
-done
-
-# 启动训练
+export PYTHONPATH="$PROJECT_ROOT/../unitree_rl_mjlab/src:$PROJECT_ROOT/src"
 python -m unitree_viser.cli train "$TASK" "$@"
 
 # 提示浏览器访问 (如果有 client 端)

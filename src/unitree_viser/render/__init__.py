@@ -1,16 +1,10 @@
 """Render 工具集 - Viser 后台渲染 + 视图类封装.
 
-延迟导入 viser / numpy 相关模块, 避免在仅有 stdlib 的环境 (如 smoke test)
+延迟导入 viser 相关模块, 避免在仅有 stdlib 的环境 (如 smoke test)
 import 时失败. 用户从 ``unitree_viser.render`` 显式调用函数才触发实际 import.
 """
 
 from __future__ import annotations
-
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    # 仅供类型检查, 实际 import 在 __getattr__ 中
-    pass
 
 
 def __getattr__(name):

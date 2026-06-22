@@ -49,30 +49,87 @@ unitree_rl_mjlab_viser/
 
 ## 安装
 
-### 前置条件
+### 快速开始 (推荐)
 
-- Python ≥ 3.10
-- 已安装 [unitree_rl_mjlab](https://github.com/unitreerobotics/unitree_rl_mjlab) (本项目以它为依赖)
-- 已安装 mjlab 1.2.0 + mujoco-warp 3.5.0 (unitree_rl_mjlab 的依赖)
-- NVIDIA GPU + CUDA (训练用)
+`scripts/install_env.sh` 会**自动检测 NVIDIA GPU**, 选择对应的安装路径:
 
-### 安装步骤
+| 环境 | 安装路径 | 运行时 |
+|---|---|---|
+| **有 NVIDIA GPU** | PyTorch `+cu128` + nvidia 运行时 + `libegl1-mesa` | `MUJOCO_GL=egl` |
+| **无 GPU / AMD 集显** | PyTorch `+cpu` + `libosmesa6` | `CUDA_VISIBLE_DEVICES=""` + `MUJOCO_GL=osmesa` |
 
 ```bash
 # 1. 克隆本项目 (与 unitree_rl_mjlab 同级)
 cd /home/kxy/work/unitree
 git clone <this-repo> unitree_rl_mjlab_viser
-
-# 2. 进入项目目录
 cd unitree_rl_mjlab_viser
 
-# 3. 安装 (editable 模式)
+# 2. 一键安装 (自动检测 GPU/CPU)
+./scripts/install_env.sh
+
+# 3. 验证
+./start.sh version      # 显示版本 + GPU/CPU 模式 + 关键依赖
+./start.sh test         # 跑 smoke test (10 passed)
+./start.sh list         # 列出所有可用任务
+```
+
+### 安装模式选项
+
+```bash
+# 强制 GPU 模式 (服务器: 已知有 NVIDIA 卡)
+./scripts/install_env.sh --force-gpu
+
+# 强制 CPU 模式 (笔记本没独显 / WSL2 无 GPU 透传)
+./scripts/install_env.sh --force-cpu
+
+# 国内用户: 用阿里云镜像加速
+./scripts/install_env.sh --mirror cn
+
+# 重建环境 (修改 Python 版本 / 重装)
+./scripts/install_env.sh --recreate --force-gpu
+
+# 跳过 apt (自己装过系统依赖)
+./scripts/install_env.sh --no-apt
+```
+
+### 委托自 start.sh
+
+`start.sh deps` 现在自动委托给 `install_env.sh`:
+
+```bash
+./start.sh deps              # 等价于 ./scripts/install_env.sh
+./start.sh deps --force-cpu  # 强制 CPU 模式
+```
+
+### 手动安装 (不推荐)
+
+如果不想用一键脚本, 可手动:
+
+```bash
+# 1. 创建 venv
+python3.10 -m venv .venv
+source .venv/bin/activate
+pip install --upgrade "pip>=23" "wheel" "setuptools<82"
+
+# 2. 装 PyTorch (二选一)
+pip install torch==2.11.0+cu128 torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
+# 或者 CPU-only:
+# pip install torch==2.11.0+cpu torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+
+# 3. 装其他依赖
+pip install -e ../unitree_rl_mjlab  # mjlab 1.2.0 + mujoco-warp 3.5.0 + scipy
+pip install "mujoco>=3.5.0,<3.6.0" "warp-lang>=1.12.0,<1.13.0"
 pip install -e .
 
-# 4. 验证安装
+# 4. 验证
 PYTHONPATH=src python3 tests/test_smoke.py
-# 期望: 9 passed, 0 skipped, 0 failed
 ```
+
+### CPU 模式注意事项
+
+> ⚠️ mjlab 1.2.0 的 CPU 模式是 **experimental**: 上游有 `skipif(not torch.cuda.is_available())` 的测试标记 ("Likely bug on CPU MjWarp").  
+> **功能可用**, 但部分高级特性 (大 batch 并行 raycast sensor 等) 可能不稳定.  
+> 适合: 调试 / 小规模仿真 / 教学演示. **生产训练请用 GPU**.
 
 ### 关键依赖
 
@@ -81,8 +138,12 @@ PYTHONPATH=src python3 tests/test_smoke.py
 dependencies = [
     "viser>=0.2.0",                        # 浏览器 3D 可视化
     "tyro>=0.9.0",                         # CLI 解析
-    "torch>=2.0",
-    "unitree_rl_mjlab",                    # 来自 ../unitree_rl_mjlab
+    "torch>=2.0",                          # 具体 wheel 由 install_env.sh 选择
+    "scipy>=1.11.0",                       # mjlab.terrains 依赖
+    "mujoco>=3.5.0,<3.6.0",                # mjlab 物理后端
+    "warp-lang>=1.12.0,<1.13.0",           # mjlab 底层 kernel 引擎
+    "setuptools<82",                       # PyTorch 2.11.0 要求
+    "unitree_rl_mjlab",                    # 来自 ../unitree_rl_mjlab (editable)
     "mjlab==1.2.0",
     "mujoco-warp==3.5.0",
 ]

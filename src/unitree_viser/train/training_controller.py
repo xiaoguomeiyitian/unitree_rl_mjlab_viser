@@ -57,19 +57,16 @@ class TrainingController:
             pause_event=threading.Event(),
             single_step=threading.Event(),
         )
-        # 默认 paused=True, 方便用户先看 GUI 再启动训练
-        # 但 CLI 默认会立刻 clear, 所以这里保持默认 false
+        # 训练开始时不暂停, 让用户先点 Pause 再观察
         self._state.pause_event.clear()
         self._state.single_step.clear()
 
-        # 创建 GUI
         self._build_gui(initial_fps=fps)
 
     def _build_gui(self, initial_fps: float) -> None:
         import viser
 
         with self._server.gui.add_folder("Training Control"):
-            # Pause / Resume 按钮
             self._pause_button = self._server.gui.add_button(
                 "Pause",
                 icon=viser.Icon.PLAYER_PAUSE,
@@ -79,7 +76,6 @@ class TrainingController:
             def _(_) -> None:
                 self.toggle_pause()
 
-            # 单步按钮
             self._step_button = self._server.gui.add_button(
                 "Step (1 iter)",
                 icon=viser.Icon.PLAYER_TRACK_NEXT,
@@ -89,7 +85,6 @@ class TrainingController:
             def _(_) -> None:
                 self.request_single_step()
 
-            # 速度滑块
             self._speed_slider = self._server.gui.add_slider(
                 "Render Speed (x)",
                 min=0.25,
@@ -103,7 +98,6 @@ class TrainingController:
             def _(event) -> None:
                 self._state.speed_multiplier = float(event.target.value)
 
-            # FPS 状态
             self._status_html = self._server.gui.add_html(
                 f"<div>Target FPS: <b>{initial_fps:.1f}</b></div>"
             )

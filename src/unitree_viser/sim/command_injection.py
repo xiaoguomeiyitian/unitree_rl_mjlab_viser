@@ -5,7 +5,6 @@
 - ``vx`` (m/s) - 前进速度
 - ``vy`` (m/s) - 横向速度
 - ``wz`` (rad/s) - 偏航角速度
-- ``heading`` (rad) - 目标朝向 (可选, 仅当命令支持 heading 时)
 
 在 ``env.step()`` 之前把这些值写入 ``env.command_manager._terms[<name>].vel_command_b``,
 覆盖默认的命令采样.
@@ -20,12 +19,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-import numpy as np
-
 if TYPE_CHECKING:
     import torch
-
-if TYPE_CHECKING:
     import viser
     from mjlab.envs import ManagerBasedRlEnv
 
@@ -40,16 +35,15 @@ class CommandInjector:
         command_name: str = "twist",
     ) -> None:
         """Args:
-        server: viser.ViserServer 实例
-        env: mjlab ManagerBasedRlEnv (通常 ``env.unwrapped``)
-        command_name: ``env.command_manager._terms`` 中的 key
-                       (默认 ``twist`` 对应速度任务; 跟踪任务用 ``motion``)
+            server: viser.ViserServer 实例
+            env: mjlab ManagerBasedRlEnv (通常 ``env.unwrapped``)
+            command_name: ``env.command_manager._terms`` 中的 key
+                           (默认 ``twist`` 对应速度任务; 跟踪任务用 ``motion``)
         """
         self._server = server
         self._env = env
         self._command_name = command_name
 
-        # 检查命令存在
         if command_name not in env.command_manager._terms:
             raise ValueError(
                 f"Command '{command_name}' not in env.command_manager._terms. "
@@ -65,7 +59,6 @@ class CommandInjector:
         }
         self._enabled = True
 
-        # 构建 GUI
         self._build_gui()
 
     def _build_gui(self) -> None:
@@ -137,7 +130,6 @@ class CommandInjector:
         if not self._enabled:
             return
 
-        # 运行时导入 torch (TYPE_CHECKING, 避免无 torch 时 import 失败)
         import torch as _torch
 
         # 兼容多种 term 类型

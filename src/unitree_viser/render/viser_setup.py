@@ -78,20 +78,17 @@ def setup_viser_for_training(
     """
     sim = env.sim
 
-    # 1. 服务器 + 场景
     server = _create_viser_server(port=port, label="Unitree RL Training")
     scene = _create_scene(server, env)
     scene.env_idx = env_idx
     scene.camera_tracking_enabled = True
 
-    # 2. 视口/环境选择 GUI
     scene.create_visualization_gui(
         camera_distance=3.0,
         camera_azimuth=45.0,
         camera_elevation=20.0,
     )
 
-    # 3. Info 面板 (HTML)
     gui_state: dict[str, Any] = {}
 
     with server.gui.add_folder("Training Info"):
@@ -102,7 +99,6 @@ def setup_viser_for_training(
             "FPS: <b>--</b>"
             "</div>"
         )
-        # 折线图占位 (按需创建, 避免启动慢)
         reward_plotter = ViserTermPlotter(
             server=server,
             term_names=["Mean Reward", "Episode Length"],
@@ -112,7 +108,6 @@ def setup_viser_for_training(
     gui_state["info_html"] = info_html
     gui_state["reward_plotter"] = reward_plotter
 
-    # 4. 训练控制 (可选)
     if enable_control:
         from unitree_viser.train.training_controller import TrainingController
 
@@ -121,13 +116,11 @@ def setup_viser_for_training(
     else:
         gui_state["controller"] = None
 
-    # 5. 默认相机
     @server.on_client_connect
     def _on_connect(client: viser.ClientHandle) -> None:
         client.camera.position = np.array([3.0, -3.0, 2.0])
         client.camera.look_at = np.array([0.0, 0.0, 0.3])
 
-    # 6. 构造 ViserHandle (供后台渲染线程使用)
     viser_handle = make_viser_handle(
         server=server,
         scene=scene,

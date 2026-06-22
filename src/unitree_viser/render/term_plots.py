@@ -12,6 +12,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+import numpy as np
+
 if TYPE_CHECKING:
     import viser
 
@@ -71,11 +73,9 @@ class ViserTermPlotter:
         handles: dict[str, Any] = {}
         with server.gui.add_folder(name):
             for term_name in term_names:
-                # viser >= 0.2 提供 GuiPlotHandle
                 plot = server.gui.add_plot(
                     f"/plot/{term_name}",
                     aspect=3.0,
-                    # initial values: empty
                 )
                 handles[term_name] = plot
         # 用一个简单的 buffer 保存最近 N 个点
@@ -92,7 +92,6 @@ class ViserTermPlotter:
             values: term_name -> value, 键必须是 ``term_names`` 的子集
         """
         if self._mode == "mjlab":
-            # mjlab 的接口 (假设)
             self._impl.update(iteration=iteration, values=values)
             return
 
@@ -113,7 +112,3 @@ class ViserTermPlotter:
             except Exception:
                 # 旧版 viser 的 API 不同, 跳过
                 pass
-
-
-# 延迟 import numpy 避免顶层失败
-import numpy as np  # noqa: E402

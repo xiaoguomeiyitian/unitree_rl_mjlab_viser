@@ -18,12 +18,16 @@ keywords = ["reinforcement-learning", "robotics", "mujoco", "viser", "unitree"]
 dependencies = [
     "viser>=0.2.0",
     "tyro>=0.9.0",
-    "torch>=2.0",
+    "torch>=2.0",          # 具体 wheel 由 install_env.sh 选择 (GPU: +cu128, CPU: +cpu)
     "numpy",
-    # 上游以 editable 模式安装到环境里 (见 README 安装步骤)
-    "unitree_rl_mjlab @ file:///${PROJECT_ROOT}/../unitree_rl_mjlab",
+    "scipy>=1.11.0",              # mjlab.terrains 隐式依赖
+    "mujoco>=3.5.0,<3.6.0",       # mjlab 物理后端
+    "warp-lang>=1.12.0,<1.13.0",  # mjlab 底层 GPU/CPU kernel 引擎
+    "setuptools<82",              # PyTorch 2.11.0+cu128 要求; pin 防止 setuptools 升级到不兼容版本
     "mjlab==1.2.0",
     "mujoco-warp==3.5.0",
+    # 上游 unitree_rl_mjlab 由 start.sh/install_env.sh 单独 editable 安装
+    # (见 README 安装步骤),不在这里声明,避免 pip 解析路径错误
 ]
 
 [project.optional-dependencies]

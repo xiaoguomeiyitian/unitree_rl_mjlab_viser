@@ -106,16 +106,31 @@ def test_sim_viewer_module():
         SimViewer,
         _zero_policy,
         _random_policy,
+        _make_typed_policy,
     )
 
-    obs = torch.zeros(1, 12)
-    a = _zero_policy(obs)
-    assert a.shape == (1, 1)
-    assert a.device == obs.device
+    # obs 可能是 tensor (来自 wrapper) 或 dict (来自 ManagerBasedRlEnv)
+    obs_tensor = torch.zeros(1, 12)
+    obs_dict = {"actor": torch.zeros(1, 12), "critic": torch.zeros(1, 47)}
 
-    a = _random_policy(obs)
-    assert a.shape == (1, 1)
+    # 默认 _zero_policy 输出 12 维 (Unitree Go2)
+    a = _zero_policy(obs_dict)
+    assert a.shape == (1, 12), f"expected (1, 12), got {a.shape}"
+    assert a.device == obs_dict["actor"].device
+
+    a = _random_policy(obs_dict)
+    assert a.shape == (1, 12)
     assert (a >= -1.0).all() and (a <= 1.0).all()
+
+    # _make_typed_policy 包装: 输出 (n, num_actions) 形状
+    typed = _make_typed_policy(_zero_policy, 12)
+    a = typed(obs_dict)
+    assert a.shape == (1, 12)
+
+    # 也支持 tensor 输入
+    a = _zero_policy(obs_tensor)
+    assert a.shape == (1, 12)
+
     print("✓ sim_viewer: zero/random policy returns correct shape")
 
 
@@ -168,6 +183,44 @@ def test_term_plots():
     print("✓ term_plots: ViserTermPlotter class present")
 
 
+def test_install_script_exists():
+    """一键安装脚本存在且语法正确.
+
+    检查:
+    1. scripts/install_env.sh 存在
+    2. 有可执行权限
+    3. 通过 bash -n 语法检查
+    4. 包含关键的 install_pytorch_gpu / install_pytorch_cpu 函数
+    """
+    import os
+    import subprocess
+
+    # smoke test 运行时的 cwd 不一定是项目根, 用文件相对路径
+    test_dir = os.path.dirname(os.path.abspath(__file__))
+    project_root = os.path.dirname(test_dir)
+    install_script = os.path.join(project_root, "scripts", "install_env.sh")
+
+    assert os.path.exists(install_script), f"install script not found: {install_script}"
+    assert os.access(install_script, os.X_OK), f"install script not executable: {install_script}"
+
+    # 语法检查
+    result = subprocess.run(
+        ["bash", "-n", install_script],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, f"install_env.sh syntax error: {result.stderr}"
+
+    # 内容检查 - 必须有 GPU/CPU 分支
+    with open(install_script, "r", encoding="utf-8") as f:
+        content = f.read()
+    assert "install_pytorch_gpu" in content, "missing install_pytorch_gpu function"
+    assert "install_pytorch_cpu" in content, "missing install_pytorch_cpu function"
+    assert "MUJOCO_GL" in content, "missing MUJOCO_GL configuration"
+
+    print(f"✓ install_env.sh: exists + executable + syntax OK ({os.path.getsize(install_script)} bytes)")
+
+
 def main() -> None:
     """运行所有 smoke test."""
     tests = [
@@ -180,6 +233,7 @@ def main() -> None:
         test_cli_apis,
         test_render_viser_setup,
         test_term_plots,
+        test_install_script_exists,
     ]
     passed = 0
     skipped = 0

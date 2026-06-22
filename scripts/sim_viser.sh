@@ -25,4 +25,5 @@ echo -e "  剩余参数: ${YELLOW}$*${NC}"
 echo ""
 
 cd "$PROJECT_ROOT"
+export PYTHONPATH="$PROJECT_ROOT/../unitree_rl_mjlab/src:$PROJECT_ROOT/src"
 python -m unitree_viser.cli sim "$TASK" "$@"

@@ -101,6 +101,64 @@ detect_python() {
     fi
 }
 
+# ── 运行时环境自动检测 (GPU/CPU) ────────────────────────────────────
+# 每次启动时调用 nvidia-smi 探测, 自动设置:
+#   有 NVIDIA GPU:  MUJOCO_GL=egl
+#   无 NVIDIA GPU + 有 libOSMesa:  CUDA_VISIBLE_DEVICES=""  MUJOCO_GL=osmesa
+#   无 NVIDIA GPU + 无 libOSMesa:  CUDA_VISIBLE_DEVICES=""  MUJOCO_GL=egl (headless via swrast)
+#
+# 如果用户手动 export 了 CUDA_VISIBLE_DEVICES 或 MUJOCO_GL, 尊重用户选择.
+# 输出用日志, 让用户清楚知道当前是哪种模式.
+setup_runtime_env() {
+    # 用户已显式设置 → 尊重之
+    if [ -n "${MUJOCO_GL:-}" ]; then
+        log_info "运行时: 用户已设置 MUJOCO_GL=$MUJOCO_GL, 尊重"
+        return 0
+    fi
+
+    local detected_gpu=false
+    if command -v nvidia-smi &>/dev/null && nvidia-smi &>/dev/null; then
+        local gpu_name
+        gpu_name=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1 | tr -d ' ')
+        if [ -n "$gpu_name" ] && [ "$gpu_name" != "Unknown" ]; then
+            detected_gpu=true
+            log_info "运行时: 检测到 NVIDIA GPU ($gpu_name), 启用 EGL 后端 (MUJOCO_GL=egl)"
+        fi
+    fi
+
+    if [ "$detected_gpu" = true ]; then
+        export MUJOCO_GL="egl"
+        # nvidia 库路径 (如 .venv/lib/.../nvidia/*/lib)
+        if [ -n "${PYTHON_BIN:-}" ] && [ -x "$PYTHON_BIN" ]; then
+            local pyver
+            pyver=$("$PYTHON_BIN" -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')" 2>/dev/null)
+            local site_nvidia="$VENV_DIR/lib/python${pyver}/site-packages/nvidia"
+            if [ -d "$site_nvidia" ]; then
+                local extra_ld
+                extra_ld=$(find "$site_nvidia" -type d -name 'lib' 2>/dev/null | sort -u | tr '\n' ':')
+                if [ -n "$extra_ld" ]; then
+                    export LD_LIBRARY_PATH="${extra_ld}${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+                    log_info "运行时: 已添加 nvidia 库到 LD_LIBRARY_PATH"
+                fi
+            fi
+        fi
+    else
+        export CUDA_VISIBLE_DEVICES=""
+        # CPU 模式: 优先 OSMesa (软件光栅化, 无显示);若没装则降级 EGL
+        # (EGL 配合 swrast 也能 headless 工作, 但需要 libEGL + libGL)
+        if ldconfig -p 2>/dev/null | grep -q "libOSMesa\.so" \
+            || [ -f /usr/lib/x86_64-linux-gnu/libOSMesa.so ] \
+            || [ -f /usr/lib/x86_64-linux-gnu/libOSMesa.so.6 ]; then
+            export MUJOCO_GL="osmesa"
+            log_info "运行时: 未检测到 NVIDIA GPU, 切换到 CPU+OSMesa 模式 (CUDA_VISIBLE_DEVICES=\"\", MUJOCO_GL=osmesa)"
+        else
+            export MUJOCO_GL="egl"
+            log_warn "运行时: 未检测到 NVIDIA GPU, 且未安装 libOSMesa"
+            log_info "        降级到 EGL 后端 (MUJOCO_GL=egl), 配合 swrast 软件渲染可 headless 跑"
+        fi
+    fi
+}
+
 # ── 检查关键依赖 ──────────────────────────────────────────────────────────
 check_core_deps() {
     local missing=()
@@ -115,11 +173,17 @@ check_core_deps() {
 }
 
 # ── 构建 PYTHONPATH ──────────────────────────────────────────────────────
+# 关键: 把 unitree_rl_mjlab/src 放第一位, 让 `import src` 优先解析为兄弟项目的
+# src 包 (有 __init__.py, 含 SRC_PATH 等), 而不是本项目空 src 目录
+# (后者会被 Python 当作 namespace package, 导致 `from src import SRC_PATH` 失败)
 build_pythonpath() {
-    local pp="$SRC_DIR"
-    [ -n "$SIBLING_RL_DIR" ] && pp="$pp:$SIBLING_RL_DIR/src"
+    local pp=""
+    [ -n "$SIBLING_RL_DIR" ] && pp="$SIBLING_RL_DIR/src"
+    pp="$pp:$SRC_DIR"
     PYTHONPATH="$pp"
     export PYTHONPATH
+    # 同步给 cli.py 的 sys.path 修复用
+    [ -n "$SIBLING_RL_DIR" ] && export UNITREE_RL_MJLAB_SRC="$SIBLING_RL_DIR/src"
 }
 
 # ── 检查上游 task 注册表是否可导入 ─────────────────────────────────────
@@ -292,6 +356,9 @@ run_cmd() {
         version) log_info "显示版本信息" ;;
     esac
 
+    # 自动检测 GPU/CPU 并设置运行时环境变量 (每次启动都跑)
+    setup_runtime_env
+
     log_info "Python: $VENV_LABEL"
     log_info "PYTHONPATH: $PYTHONPATH"
     echo ""
@@ -338,18 +405,32 @@ run_cmd() {
             exec "$PYTHON_BIN" tests/test_smoke.py
             ;;
         deps)
-            if [ "$DEPS_INSTALL" = "true" ]; then
-                "$PIP_BIN" install viser tyro
-                if [ "$DEPS_FULL" = "true" ]; then
-                    "$PIP_BIN" install -e "$SIBLING_RL_DIR"
-                else
-                    "$PIP_BIN" install --no-deps mjlab==1.2.0
-                fi
-            else
-                check_core_deps || log_warn "用 --install 自动补全"
+            # ── 委托给 scripts/install_env.sh ──
+            # 原版的 install_viser_tyro / install_mjlab 已废弃:
+            #  - 只装 viser+tyro 不够 (缺 torch/warp/mjlab 全部)
+            #  - mjlab --no-deps 会破坏依赖图
+            # 新脚本: 自动检测 GPU → 选择 cu128/cpu wheel → 完整装好
+            local install_script="$SCRIPT_DIR/scripts/install_env.sh"
+            if [ ! -x "$install_script" ]; then
+                log_error "未找到 $install_script"
+                log_info "请确认仓库完整 (含 scripts/ 目录)"
+                exit 1
             fi
-            # 显示详情
-            "$PIP_BIN" list 2>/dev/null | grep -iE "viser|tyro|mjlab|mujoco|warp|rsl|torch|nvidia" | head -20
+            # 透传参数: --install → install_env.sh 不识别, 改写为 --force-gpu
+            local install_args=()
+            for arg in "$@"; do
+                case "$arg" in
+                    --install)  install_args+=("--force-gpu") ;;  # 默认行为: 自动检测
+                    --full)     install_args+=("--force-gpu") ;;
+                    *)          install_args+=("$arg") ;;
+                esac
+            done
+            # 如果本项目 venv 不存在, 强制创建 (不询问)
+            if [ ! -d "$VENV_DIR" ]; then
+                install_args+=("--recreate")
+            fi
+            log_info "委托给 install_env.sh (自动检测 GPU/CPU)"
+            exec "$install_script" "${install_args[@]}"
             ;;
         version)
             echo ""
@@ -359,6 +440,18 @@ run_cmd() {
             echo "  venv:    $VENV_LABEL"
             echo "  sibling: $SIBLING_RL_DIR"
             [ -n "$SIBLING_GR00T_DIR" ] && echo "  gr00t:   $SIBLING_GR00T_DIR"
+            echo ""
+            log_banner "═══ 运行时环境 ═══"
+            echo "  MUJOCO_GL:           ${MUJOCO_GL:-<未设置>}"
+            echo "  CUDA_VISIBLE_DEVICES: '${CUDA_VISIBLE_DEVICES:-<未设置>}'"
+            # 显示检测到的 GPU 信息 (即使未设置 MUJOCO_GL)
+            if command -v nvidia-smi &>/dev/null; then
+                local gpu_info
+                gpu_info=$(nvidia-smi --query-gpu=name,driver_version --format=csv,noheader 2>/dev/null | head -1)
+                if [ -n "$gpu_info" ]; then
+                    echo "  nvidia-smi:         $gpu_info"
+                fi
+            fi
             echo ""
             log_banner "═══ 关键依赖 ═══"
             for pkg in viser tyro mjlab torch mujoco warp rsl_rl_lib mujoco_warp; do
@@ -746,8 +839,23 @@ confirm_and_start() {
 # ══════════════════════════════════════════════════════════════════════════════
 # 入口
 # ══════════════════════════════════════════════════════════════════════════════
-detect_python
+# deps 模式用于安装环境, 此时可能还没有 python → 跳过 detect_python
+# 其他模式 (train/sim/list/test/version) 必须有 python
+# build_pythonpath 不依赖 python, 任何模式都可调用 (只设 PYTHONPATH)
 build_pythonpath
+
+case "${1:-}" in
+    deps|-h|--help|help)
+        # 给 stub 避免 run_cmd 等函数引用空变量
+        : "${PYTHON_BIN:=python3}"
+        : "${PIP_BIN:=pip3}"
+        : "${VENV_LABEL:=系统 Python (无 venv)}"
+        : "${VENV_DIR:=$PROJECT_DIR/.venv}"
+        ;;
+    *)
+        detect_python
+        ;;
+esac
 
 if [ $# -eq 0 ]; then
     # ── 交互式 ──
