@@ -1,6 +1,6 @@
 """unitree-viser - 主 CLI 入口.
 
-两个子命令:
+子命令:
 
 - ``unitree-viser train <TaskID>`` — 训练模式 (后台异步渲染)
 - ``unitree-viser sim <TaskID>``  — 仿真模式 (浏览器驱动虚拟机器人)
@@ -18,22 +18,11 @@ from typing import Literal, Union
 
 import tyro
 
-# mjlab / unitree_rl_mjlab 不在顶层 import, 以便 smoke test 能在没有 mjlab 的环境下通过.
 
-
-# ── sys.path 修复 (必须在 import mjlab 之前) ────────────────────────────
-# 当从 viser 项目目录运行 `python -m unitree_viser.cli` 时, sys.path 包含
-# `/root/unitree/unitree_rl_mjlab_viser/src` (因为 cli.py 在那里). 该目录
-# 虽然没有 `__init__.py`, 但 Python 会把它当作 namespace package, 抢占
-# `import src.tasks` 对兄弟项目 unitree_rl_mjlab/src 的解析.
-# 解决: 1) 把兄弟项目 src 强制放到 sys.path 最前;
-#       2) **关键**: 删掉或遮蔽 viser/src 这个会触发 namespace 抢占的路径;
-#       3) 显式 `import src` 一次, 锁住 real package.
+# ── sys.path 修复 ────────────────────────────────────────────────────────
 def _ensure_sibling_src_on_path() -> None:
-    # 0. 删掉空字符串条目 (代表 cwd)
     sys.path[:] = [p for p in sys.path if p != ""]
 
-    # 1. 找兄弟项目 src 路径
     sib = os.environ.get("UNITREE_RL_MJLAB_SRC")
     if not (sib and Path(sib).is_dir()):
         here = Path(__file__).resolve()
@@ -46,48 +35,36 @@ def _ensure_sibling_src_on_path() -> None:
     if not sib:
         return
 
-    # 2. 移除会触发 namespace 抢占的 viser/src 路径
-    # 关键: 任何 sys.path 下的路径, 如果它本身是一个会被当作 `src` namespace package
-    # 的目录 (即: 没有 __init__.py 但 Python 会扫到), 都要过滤掉.
     here = Path(__file__).resolve()
-    viser_pkg_dir = here.parent  # /root/unitree/unitree_rl_mjlab_viser/src/unitree_viser
-    viser_src_dir = viser_pkg_dir.parent  # /root/unitree/unitree_rl_mjlab_viser/src
+    viser_pkg_dir = here.parent
+    viser_src_dir = viser_pkg_dir.parent
 
-    # 收集要过滤掉的路径
     bad_paths = set()
     for p in sys.path:
         pp = Path(p).resolve()
-        # 跳过 viser/src 目录 (会触发 src namespace 抢占)
         if pp == viser_src_dir:
             bad_paths.add(p)
-        # 跳过 viser/src/unitree_viser 目录
         if pp == viser_pkg_dir:
             bad_paths.add(p)
-        # 跳过任何含空 src/ 子目录的路径 (兜底)
         if (pp / "src").is_dir() and not (pp / "src" / "__init__.py").exists():
-            # 这是个可疑的命名空间冲突路径
-            # 但只对那些 src 目录下没有 unitree_rl_mjlab 等内容的删
             cand = pp / "src"
             if not any((cand / name).exists() for name in ["assets", "tasks", "__init__.py"]):
                 bad_paths.add(p)
 
     sys.path[:] = [p for p in sys.path if p not in bad_paths]
 
-    # 3. 把兄弟项目 src 放到 sys.path 最前
     if sib in sys.path:
         sys.path.remove(sib)
     sys.path.insert(0, sib)
 
-    # 4. 关键: 清掉 sys.modules 里可能已经被错误加载的 `src`, 然后重新 import
     sys.modules.pop("src", None)
     sys.modules.pop("src.assets", None)
     sys.modules.pop("src.tasks", None)
     try:
         import src  # noqa: F401
     except ImportError:
-        pass  # 找不到就放过, 后续调用方自己报错
+        pass
 
-    # DEBUG: 打印 sys.path 和 src 解析状态
     if os.environ.get("UNITREE_VISER_DEBUG_PATH"):
         print(f"[DEBUG-PATH] sys.path[:5]: {sys.path[:5]}", file=sys.stderr)
         if "src" in sys.modules:
@@ -97,9 +74,8 @@ def _ensure_sibling_src_on_path() -> None:
 
 
 def _stub_mediapy() -> None:
-    """mediapy 1.2.6 在 Python 3.12 + numpy 2.x 下无法导入 (npt.NDArray[Any] 报错).
-    mjlab 1.2.0 的 _configure_mediapy() 强制 import mediapy, 失败会让 sim/train 起不来.
-    这里提前注入一个最小 stub, 让 mjlab 完成初始化 (它只用 set_ffmpeg, 其他不用).
+    """mediapy 1.2.6 在 Python 3.12 + numpy 2.x 下无法导入, 注入最小 stub.
+    mjlab 1.2.0 的 _configure_mediapy() 强制 import mediapy, 此处提前注入 stub.
     """
     if "mediapy" in sys.modules:
         return
@@ -108,7 +84,7 @@ def _stub_mediapy() -> None:
     except (ImportError, TypeError):
         import types
         stub = types.ModuleType("mediapy")
-        stub.__file__ = "(viser-stub)"  # 标记为 stub
+        stub.__file__ = "(viser-stub)"
         def _set_ffmpeg(_path): pass
         stub.set_ffmpeg = _set_ffmpeg
         sys.modules["mediapy"] = stub
@@ -128,17 +104,15 @@ class TrainArgs:
     task: str
     """任务 ID, e.g. ``Unitree-G1-Flat``, ``Unitree-Go2-Rough``"""
 
-    # ── Viser 选项 ──
     viser_port: int = 20006
-    """Viser HTTP/WS 端口 (0 = 不启动 Viser, 仅训练)"""
+    """Viser HTTP/WS 端口 (0 = 不启动 Viser)"""
     viser_env_idx: int = 0
     """显示哪个环境"""
     viser_fps: float = 10.0
     """Viser 渲染目标 FPS"""
     enable_control: bool = False
-    """是否启用训练控制 (暂停/单步/速度滑块)"""
+    """是否启用训练控制面板 (暂停/单步/速度滑块)"""
 
-    # ── 训练超参 (透传到 mjlab TrainConfig) ──
     num_envs: int | None = None
     """覆盖 env_cfg.scene.num_envs"""
     max_iterations: int | None = None
@@ -150,14 +124,12 @@ class TrainArgs:
     motion_file: str | None = None
     """跟踪任务必填, 指向 .npz 文件"""
 
-    # ── Headless 模式 ──
     headless: bool = False
     """完全跳过 Viser, 用 unitree_rl_mjlab 原版 train.py (用于 CI)"""
 
 
 def run_train(args: TrainArgs) -> None:
     """训练模式主函数."""
-    # 延迟 import - 需要 mjlab / unitree_rl_mjlab 已安装
     import mjlab.tasks  # noqa: F401
     import src.tasks  # noqa: F401
     from mjlab.tasks.registry import load_env_cfg, load_rl_cfg, load_runner_cls
@@ -177,14 +149,11 @@ def run_train(args: TrainArgs) -> None:
     agent_cfg = load_rl_cfg(args.task)
     runner_cls_base = load_runner_cls(args.task)
 
-    # mjlab 1.2.0+ 返回 dataclass, 但 MjlabOnPolicyRunner/RslRl 期望 dict
-    # (上游 train.py 也是用 asdict 转换)
     from dataclasses import asdict
     agent_cfg = asdict(agent_cfg)
 
     if args.num_envs is not None:
         env_cfg.scene.num_envs = args.num_envs
-    # agent_cfg 现在是 dict
     if args.max_iterations is not None:
         agent_cfg["max_iterations"] = args.max_iterations
     if args.seed is not None:
@@ -192,7 +161,6 @@ def run_train(args: TrainArgs) -> None:
     if args.save_interval is not None:
         agent_cfg["save_interval"] = args.save_interval
 
-    # 跟踪任务需要 motion_file
     is_tracking = "motion" in env_cfg.commands
     if is_tracking and not args.motion_file and not args.headless:
         raise ValueError(
@@ -250,9 +218,6 @@ def run_train(args: TrainArgs) -> None:
         print(f"\n[TRAIN] 完成. 日志目录: {log_dir}")
 
 
-# ── Sim 子命令 ────────────────────────────────────────────────────────────
-
-
 @dataclass
 class SimArgs:
     """仿真模式参数."""
@@ -266,7 +231,7 @@ class SimArgs:
     """无 checkpoint 时使用的 policy (zero/random)"""
 
     num_envs: int = 1
-    """仿真环境数 (默认 1, 简单)"""
+    """仿真环境数 (默认 1)"""
 
     viser_port: int = 20006
     """Viser HTTP/WS 端口"""
@@ -278,24 +243,19 @@ class SimArgs:
     command_name: str = "twist"
     """命令 term 名称"""
 
-    # ── 命令注入源 (Viser GUI vs DDS 遥控器) ──
     command_source: Literal["gui", "dds", "both"] = "gui"
-    """命令注入源:
-       - ``gui`` (默认): 用 Viser GUI 滑块手动设置 vx/vy/wz
-       - ``dds``: 用 DDS 遥控器 (订阅 ``rt/{robot_key}/wirelesscontroller``)
-       - ``both``: 同时启用, ``dds`` 消息优先, GUI 滑块作为断连回退
-    """
+    """命令注入源: gui/dds/both"""
     dds_domain: int = 0
-    """CycloneDDS 域 ID (与遥控器端一致, 默认 0)"""
+    """CycloneDDS 域 ID (与遥控器端一致)"""
     dds_interface: str = "lo"
-    """CycloneDDS 网络接口 (``lo``=本机回环, ``enp*``=以太网)"""
+    """CycloneDDS 网络接口 (lo=本机, enp*=以太网)"""
     robot_key: str = "go2_0"
-    """DDS topic 后缀, 订阅 ``rt/{robot_key}/wirelesscontroller``"""
+    """DDS topic 后缀"""
     dds_timeout: float = 0.5
     """DDS 消息超时 (秒), 超时后归零; 设 0 禁用"""
 
     max_steps: int | None = None
-    """最多多少步 (None = 无限, 直到用户 Quit)"""
+    """最多多少步 (None = 无限)"""
 
     headless: bool = False
     """不启动 Viser, 仅仿真 (用于测试)"""
@@ -315,7 +275,6 @@ def run_sim(args: SimArgs) -> None:
     device = "cuda:0" if torch.cuda.is_available() else "cpu"
     env = ManagerBasedRlEnv(cfg=env_cfg, device=device)
 
-    # 加载策略
     policy = None
     if args.checkpoint:
         from mjlab.rl import MjlabOnPolicyRunner
@@ -340,10 +299,8 @@ def run_sim(args: SimArgs) -> None:
         policy = _make_typed_policy(base, num_actions)
         print(f"[SIM] 使用 {args.policy or 'zero'} policy ({num_actions} DOF)")
 
-    # 启动 Viser
     if args.headless:
         print("[SIM] Headless 模式: 不启动 Viser")
-        # 即使 headless, 也允许 DDS 命令源生效 (用于 CI 集成测试)
         dds_injector = None
         if args.command_source in ("dds", "both"):
             try:
@@ -368,7 +325,6 @@ def run_sim(args: SimArgs) -> None:
                 print(f"[SIM] 跳过 DDS 命令注入: {e}")
                 dds_injector = None
 
-        # 简单 step 循环
         obs, _ = env.reset()
         try:
             for i in range(args.max_steps or 100):
@@ -378,9 +334,7 @@ def run_sim(args: SimArgs) -> None:
                     dds_injector.inject()
                 obs, _, _, _, _ = env.step(actions)
                 if i % 10 == 0:
-                    pending = (
-                        dds_injector.get_pending() if dds_injector else None
-                    )
+                    pending = dds_injector.get_pending() if dds_injector else None
                     cmd_str = (
                         f" cmd=({pending['vx']:.2f},{pending['vy']:.2f},{pending['wz']:.2f})"
                         if pending is not None
@@ -414,19 +368,9 @@ def run_sim(args: SimArgs) -> None:
         viewer.close()
 
 
-# ── Main 入口 ─────────────────────────────────────────────────────────────
-
-
 def main() -> None:
-    """tyro CLI 入口.
-
-    兼容 tyro 0.9 (子命令 train/sim) 和 tyro 1.0+ (子命令 train-args/sim-args):
-    1. tyro 0.9 子命令名直接是类名小写: train / sim
-    2. tyro 1.0 子命令名是类名 kebab-case: train-args / sim-args
-    3. 本函数先尝试用 tyro 1.0 解析;若首参是 train/sim, 重写为新语法再解析
-    """
+    """tyro CLI 入口."""
     if len(sys.argv) > 1 and sys.argv[1] in ("train", "sim"):
-        # 把 train → train-args, sim → sim-args (兼容老用法)
         sys.argv[1] = sys.argv[1] + "-args"
 
     cli = tyro.cli(

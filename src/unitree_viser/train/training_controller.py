@@ -1,17 +1,4 @@
-"""训练控制 - 暂停 / 单步 / 速度滑块.
-
-通过 Viser GUI 按钮控制训练循环:
-
-- **Pause/Resume**: 切换 ``pause_event``, runner 在 _post_iter_hook 等待
-- **Step**: 临时清除 ``pause_event`` 让 runner 走一个 iter, 然后重新 set
-- **Speed**: 0.25x ~ 4x 滑块, 实际效果是让 async render 线程按更慢/更快的频率更新
-
-线程模型
-========
-- 训练主循环: ``MjlabOnPolicyRunner.learn()`` 在主线程
-- Viser server: 在 viser 内部线程 (按 viser 库的实现)
-- 我们的 controller: 只持有 ``threading.Event``, 无自己的线程
-"""
+"""训练控制 - 暂停 / 单步 / 速度滑块."""
 
 from __future__ import annotations
 
@@ -28,36 +15,22 @@ class _ControlState:
     """线程间共享的控制状态."""
 
     pause_event: threading.Event
-    """set 时表示训练暂停; runner 在 _post_iter_hook 中等待这个 event clear"""
-
     single_step: threading.Event
-    """set 时表示"单步请求": runner 应走 1 个 iter, 然后重新 pause"""
-
+    wakeup_event: threading.Event
     speed_multiplier: float = 1.0
-    """渲染速度倍率 (0.25x ~ 4x)"""
-
     quit_requested: bool = False
-    """用户点 Quit 时设为 True, runner 应在下一个 iter 后退出"""
 
 
 class TrainingController:
-    """封装 Viser GUI 与训练循环的暂停/单步/速度控制.
-
-    用法::
-
-        server = viser.ViserServer()
-        controller = TrainingController(server=server, fps=10.0)
-        # ... 在 ViserRunner._post_iter_hook 中:
-        controller.wait_if_paused()
-    """
+    """封装 Viser GUI 与训练循环的暂停/单步/速度控制."""
 
     def __init__(self, server: "viser.ViserServer", fps: float = 10.0) -> None:
         self._server = server
         self._state = _ControlState(
             pause_event=threading.Event(),
             single_step=threading.Event(),
+            wakeup_event=threading.Event(),
         )
-        # 训练开始时不暂停, 让用户先点 Pause 再观察
         self._state.pause_event.clear()
         self._state.single_step.clear()
 
@@ -91,7 +64,7 @@ class TrainingController:
                 max=4.0,
                 step=0.25,
                 initial_value=1.0,
-                hint="调整 Viser 渲染频率倍率 (不影响训练速度)",
+                hint="调整 Viser 渲染频率倍率",
             )
 
             @self._speed_slider.on_update
@@ -102,25 +75,23 @@ class TrainingController:
                 f"<div>Target FPS: <b>{initial_fps:.1f}</b></div>"
             )
 
-    # ── 公共 API (供 runner 钩子调用) ──────────────────────────────────────
-
     def wait_if_paused(self) -> bool:
-        """如果处于暂停状态, 阻塞当前线程直到恢复.
+        """如果处于暂停状态, 阻塞直到恢复.
 
         Returns:
-            True 如果用户请求退出 (runner 应停止训练), False 继续.
+            True 如果用户请求退出.
         """
         if self._state.quit_requested:
             return True
 
         if self._state.single_step.is_set():
-            # 单步模式: 走一个 iter, 然后自动重新 pause
             self._state.single_step.clear()
             self._state.pause_event.set()
             return False
 
-        # 暂停时阻塞; clear 后返回
-        self._state.pause_event.wait()
+        while self._state.pause_event.is_set() and not self._state.quit_requested:
+            self._state.wakeup_event.wait(timeout=0.05)
+            self._state.wakeup_event.clear()
         return self._state.quit_requested
 
     def is_paused(self) -> bool:
@@ -129,6 +100,7 @@ class TrainingController:
     def toggle_pause(self) -> None:
         if self._state.pause_event.is_set():
             self._state.pause_event.clear()
+            self._state.wakeup_event.set()
             self._update_pause_button(paused=False)
             print("[CTRL] 训练已恢复")
         else:
@@ -139,6 +111,7 @@ class TrainingController:
     def request_single_step(self) -> None:
         self._state.single_step.set()
         self._state.pause_event.clear()
+        self._state.wakeup_event.set()
         print("[CTRL] 单步请求已发出")
 
     def get_speed_multiplier(self) -> float:
@@ -146,9 +119,8 @@ class TrainingController:
 
     def request_quit(self) -> None:
         self._state.quit_requested = True
-        self._state.pause_event.set()  # 解除 wait
-
-    # ── 内部 ────────────────────────────────────────────────────────────────
+        self._state.pause_event.set()
+        self._state.wakeup_event.set()
 
     def _update_pause_button(self, paused: bool) -> None:
         import viser

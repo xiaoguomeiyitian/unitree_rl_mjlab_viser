@@ -1,17 +1,9 @@
 """Viser 服务器 + 场景 + GUI 初始化工厂.
 
-负责:
-
-1. 创建 ``viser.ViserServer`` (HTTP/WS 服务, 浏览器访问)
-2. 创建 ``ViserMujocoScene`` (3D 场景句柄)
-3. 注册 GUI 控件 (Info 面板, 训练控制, 折线图)
-4. 返回 ``ViserHandle`` 给 ``async_render`` 线程使用
-
-设计
-====
-- 这是训练模式的 viewer, **不**驱动 ``env.step()`` (由 rsl_rl runner 驱动).
-- 只读取 ``env.sim`` 状态推送到浏览器, 不修改 env.
-- 训练控制(暂停/单步/速度)通过 ``TrainingController`` 注入到 runner 钩子.
+1. 创建 viser.ViserServer
+2. 创建 ViserMujocoScene
+3. 注册 GUI 控件
+4. 返回 ViserHandle 给 async_render 线程使用
 """
 
 from __future__ import annotations

@@ -1,26 +1,11 @@
 """SimViewer - 仿真模式 (无训练) 的 Viser 浏览器.
 
-与 mjlab 自带的 ``ViserPlayViewer`` 不同, SimViewer:
+与 mjlab 自带的 ViserPlayViewer 不同, SimViewer:
 
-- **不**继承 play/pause/step 按钮 (用户已在 sim 模式, 持续 stepping)
-- **支持**命令注入 — 两路:
-  - GUI: Viser GUI 滑块 → CommandInjector → vel_command_b
-  - DDS: 订阅 rt/{robot_key}/wirelesscontroller → DdsCommandInjector → vel_command_b
-- **支持**加载训练好的策略 (checkpoint) 或用 random/zero policy
-- **单环境** (num_envs=1, 仿真不需要 batch)
-
-用法::
-
-    # GUI 注入 (默认)
-    viewer = SimViewer(env=env, policy=policy, port=20006)
-    viewer.setup()
-    viewer.run()
-
-    # DDS 注入 (用 unitree_remote_ctrl 的 Web 遥控器)
-    viewer = SimViewer(
-        env=env, policy=policy, port=20006,
-        command_source="dds", robot_key="go2_0",
-    )
+- 不继承 play/pause/step 按钮
+- 支持命令注入 (GUI 滑块 / DDS 遥控器)
+- 支持加载训练好的策略 (checkpoint) 或用 random/zero policy
+- 单环境 (num_envs=1)
 """
 
 from __future__ import annotations
@@ -36,12 +21,7 @@ from unitree_viser.sim.command_injection import CommandInjector
 
 
 class PolicyLike(Protocol):
-    """策略协议 - 接受 obs tensor 或 dict, 返回 actions tensor.
-
-    接受 dict 是为了兼容 mjlab 的 ManagerBasedRlEnv.reset()/step() 返回的
-    嵌套 dict 观测 (含 'actor' / 'critic' 等子项).
-    """
-
+    """策略协议 - 接受 obs tensor 或 dict, 返回 actions tensor."""
 
     def __call__(self, obs: Any) -> torch.Tensor: ...
 
@@ -51,7 +31,6 @@ def _extract_actor_obs(obs: Any) -> torch.Tensor:
     if isinstance(obs, dict):
         if "actor" in obs:
             return obs["actor"]
-        # 退化: 取第一个 tensor 值
         for v in obs.values():
             if isinstance(v, torch.Tensor):
                 return v
@@ -60,14 +39,9 @@ def _extract_actor_obs(obs: Any) -> torch.Tensor:
 
 
 def _zero_policy(obs: Any) -> torch.Tensor:
-    """Zero policy - 输出零动作 (站立).
-
-    不能用 env.action_manager.total_action_dim, 因为这函数不在 env 上下文里.
-    调用方负责传入正确的 num_actions. 默认 12 维 (Unitree Go2 12 DOF).
-    """
+    """Zero policy - 输出零动作 (站立)."""
     actor_obs = _extract_actor_obs(obs)
     n = actor_obs.shape[0]
-    # 默认 12 DOF; 真实维度由 _make_typed_policy 包装时决定
     return torch.zeros(n, 12, device=actor_obs.device)
 
 
@@ -82,7 +56,6 @@ def _make_typed_policy(base_policy, num_actions: int):
     def typed_policy(obs: Any) -> torch.Tensor:
         actor_obs = _extract_actor_obs(obs)
         n = actor_obs.shape[0]
-        # 调 base, 然后 reshape
         try:
             out = base_policy(obs)
             if out.shape[-1] != num_actions:
@@ -94,16 +67,7 @@ def _make_typed_policy(base_policy, num_actions: int):
 
 
 class SimViewer:
-    """简单的仿真模式 Viser viewer (单环境 + 命令注入).
-
-    主循环::
-
-        while not should_stop:
-            actions = policy(obs)
-            injector.inject()                  # 写入 vel_command_b
-            obs, reward, terminated, truncated, extras = env.step(actions)
-            sim_scene_update(...)             # 推送新状态到 Viser
-    """
+    """仿真模式 Viser viewer (单环境 + 命令注入)."""
 
     def __init__(
         self,
@@ -120,20 +84,19 @@ class SimViewer:
         dds_timeout: float = 0.5,
     ) -> None:
         """Args:
-            env: ``ManagerBasedRlEnv`` (通常用 ``env.unwrapped``)
+            env: ``ManagerBasedRlEnv``
             policy: 可调用对象; ``None`` 表示 zero policy
             port: Viser HTTP/WS 端口
             env_idx: 显示的环境索引
-            inject_commands: 是否启用命令注入 GUI (仅 command_source 包含 gui 时有效)
+            inject_commands: 是否启用命令注入 GUI
             command_name: 命令 term 名称 (默认 ``twist``)
-            command_source: ``gui``/``dds``/``both`` — 决定哪些注入器生效
-            dds_domain: CycloneDDS 域 ID (与遥控器端一致)
-            dds_interface: DDS 网络接口 (``lo``=本机, ``enp*``=以太网)
-            robot_key: DDS topic 后缀, 订阅 ``rt/{robot_key}/wirelesscontroller``
-            dds_timeout: DDS 消息超时秒数, 超时归零
+            command_source: ``gui``/``dds``/``both``
+            dds_domain: CycloneDDS 域 ID
+            dds_interface: DDS 网络接口
+            robot_key: DDS topic 后缀
+            dds_timeout: DDS 消息超时秒数
         """
         self._env = env
-        # 包装 policy, 强制输出形状 (n, num_actions)
         raw_policy = policy or _zero_policy
         try:
             num_actions = int(self._env.action_manager.total_action_dim)
@@ -145,16 +108,14 @@ class SimViewer:
 
         self._server: viser.ViserServer | None = None
         self._scene: Any = None
-        # 注入器: 兼容两种类型 (GUI 滑块 / DDS 遥控器)
         self._injector_gui: CommandInjector | None = None
-        self._injector_dds: Any = None  # DdsCommandInjector (运行时导入)
+        self._injector_dds: Any = None
 
         self._should_stop = False
         self._step_count = 0
         self._inject_commands = inject_commands
         self._command_name = command_name
 
-        # ── 命令注入源配置 ──
         if command_source not in ("gui", "dds", "both"):
             raise ValueError(
                 f"command_source must be 'gui', 'dds', or 'both'; got {command_source!r}"
@@ -184,7 +145,6 @@ class SimViewer:
             camera_elevation=20.0,
         )
 
-        # ── GUI 注入器 (command_source 包含 "gui") ──
         if self._inject_commands and self._command_source in ("gui", "both"):
             try:
                 self._injector_gui = CommandInjector(
@@ -196,7 +156,6 @@ class SimViewer:
                 print(f"[SIM] 跳过 GUI 命令注入: {e}")
                 self._injector_gui = None
 
-        # ── DDS 注入器 (command_source 包含 "dds") ──
         if self._command_source in ("dds", "both"):
             try:
                 from unitree_viser.sim.dds_command_injection import (
@@ -216,7 +175,6 @@ class SimViewer:
                 print(f"[SIM] 跳过 DDS 命令注入: {e}")
                 self._injector_dds = None
 
-        # 仿真控制 GUI
         self._build_sim_control_gui()
 
         @self._server.on_client_connect
@@ -253,11 +211,7 @@ class SimViewer:
             )
 
     def run(self, max_steps: int | None = None) -> None:
-        """主循环 - 持续 stepping + 推送到 Viser.
-
-        Args:
-            max_steps: 最多多少步 (None 表示无限, 直到用户 Quit)
-        """
+        """主循环 - 持续 stepping + 推送到 Viser."""
         import mujoco_warp as mjwarp
 
         assert self._scene is not None, "call setup() first"
@@ -284,7 +238,6 @@ class SimViewer:
                 obs, reward, terminated, truncated, extras = self._env.step(actions)
                 self._step_count += 1
 
-                # 限流推送 3D 状态
                 now = time.time()
                 if now - last_render_t >= 1.0 / target_fps:
                     try:
