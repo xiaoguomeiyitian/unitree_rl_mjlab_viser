@@ -38,7 +38,7 @@ SIBLING_GR00T_DIR="$(cd "$PROJECT_DIR/../gr00t_mjlab_autodl" 2>/dev/null && pwd 
 MODE=""
 TASK=""
 VISER_PORT="20006"
-VISER_FPS="10"
+VISER_FPS="30"
 VISER_ENV_IDX="0"
 ENABLE_CONTROL="false"
 HEADLESS="false"
@@ -277,7 +277,7 @@ show_usage() {
 通用参数:
   --task <id>              任务 ID (e.g. Unitree-G1-Flat)
   --viser-port <N>         Viser HTTP/WS 端口 (默认: 20006, 0 = 禁用)
-  --viser-fps <F>          Viser 渲染 FPS (默认: 10)
+  --viser-fps <F>          Viser 渲染 FPS (默认: 30)
   --headless               禁用 Viser, 仅后台运行
 
 训练参数 (train):

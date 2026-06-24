@@ -108,7 +108,7 @@ class TrainArgs:
     """Viser HTTP/WS 端口 (0 = 不启动 Viser)"""
     viser_env_idx: int = 0
     """显示哪个环境"""
-    viser_fps: float = 10.0
+    viser_fps: float = 30.0
     """Viser 渲染目标 FPS"""
     enable_control: bool = False
     """是否启用训练控制面板 (暂停/单步/速度滑块)"""
@@ -241,6 +241,12 @@ def run_train(args: TrainArgs) -> None:
     try:
         if viser_handle is not None:
             start_viser_render_thread(viser_handle, target_fps=args.viser_fps)
+            # 将 render_thread 传给 runner, 启用训练同步
+            render_thread = gui_state.get("_render_thread")
+            if render_thread is not None:
+                runner.render_thread = render_thread
+                render_thread.set_sync_training(True)
+                print("[TRAIN] 训练同步已启用: 训练速度与渲染 FPS 同步")
         runner.learn(
             num_learning_iterations=agent_cfg["max_iterations"],
             init_at_random_ep_len=True,

@@ -1,10 +1,10 @@
 """async_render 单元测试.
 
-不真启动线程 (会浪费资源),重点测试:
+测试 ViserRenderThread 新 API + 向后兼容的函数式 API.
+重点测试:
+- ViserRenderThread: start/stop 幂等, is_alive, get_stats, set_training_state
 - make_viser_handle 字段完整性
-- start_viser_render_thread 无客户端时不调用 mjwarp.get_data_into
-- start_viser_render_thread 已启动时是幂等
-- stop_viser_render_thread 是幂等的
+- start_viser_render_thread (deprecated) 向后兼容
 """
 
 from __future__ import annotations
@@ -160,3 +160,135 @@ def test_render_thread_survives_exceptions():
             assert handle["_render_thread"].is_alive(), "线程遇到异常应继续存活"
         finally:
             async_render.stop_viser_render_thread(handle, timeout=1.0)
+
+
+# ── ViserRenderThread 新 API 测试 ─────────────────────────────────────────
+
+
+def test_viser_render_thread_creation():
+    """ViserRenderThread 创建时属性正确."""
+    from unitree_viser.render.async_render import ViserRenderThread
+
+    server = MagicMock()
+    scene = MagicMock()
+    thread = ViserRenderThread(
+        server=server,
+        scene=scene,
+        env_idx=0,
+        mj_model=MagicMock(),
+        mj_data=MagicMock(),
+        sim=MagicMock(),
+        target_fps=15.0,
+    )
+
+    assert thread.is_alive is False
+    assert thread.get_stats()["alive"] is False
+    assert thread.get_stats()["total_frames"] == 0
+    assert thread.get_stats()["error_count"] == 0
+
+
+def test_viser_render_thread_set_training_state():
+    """set_training_state 正确设置内部状态."""
+    from unitree_viser.render.async_render import ViserRenderThread
+    from unitree_viser.render.shared_state import TrainingState
+
+    thread = ViserRenderThread(
+        MagicMock(), MagicMock(), 0, MagicMock(), MagicMock(), MagicMock()
+    )
+
+    state = TrainingState()
+    thread.set_training_state(state)
+    # 通过消费验证状态已设置
+    state.update(iteration=10, mean_reward=5.0)
+    # 内部 _consume_training_state 应该能消费
+    assert thread._training_state is state
+
+
+def test_viser_render_thread_start_stop():
+    """start/stop 基本功能."""
+    from unitree_viser.render.async_render import ViserRenderThread
+
+    server = MagicMock()
+    server.get_clients.return_value = [MagicMock()]
+
+    thread = ViserRenderThread(
+        server, MagicMock(), 0, MagicMock(), MagicMock(), MagicMock(), target_fps=20.0
+    )
+
+    with patch("mujoco_warp.get_data_into"):
+        thread.start()
+        assert thread.is_alive is True
+        thread.stop(timeout=1.0)
+        assert thread.is_alive is False
+
+
+def test_viser_render_thread_idempotent_start():
+    """重复 start 是幂等的."""
+    from unitree_viser.render.async_render import ViserRenderThread
+
+    server = MagicMock()
+    server.get_clients.return_value = [MagicMock()]
+
+    thread = ViserRenderThread(
+        server, MagicMock(), 0, MagicMock(), MagicMock(), MagicMock(), target_fps=20.0
+    )
+
+    with patch("mujoco_warp.get_data_into"):
+        thread.start()
+        thread.start()  # 不应创建第二个线程
+        assert thread.is_alive is True
+        thread.stop(timeout=1.0)
+
+
+def test_viser_render_thread_stop_without_start():
+    """未 start 时 stop 不报错."""
+    from unitree_viser.render.async_render import ViserRenderThread
+
+    thread = ViserRenderThread(
+        MagicMock(), MagicMock(), 0, MagicMock(), MagicMock(), MagicMock()
+    )
+    thread.stop()  # 不应抛异常
+
+
+def test_viser_render_thread_no_clients_no_render():
+    """无客户端时, 渲染线程不应调用 mjwarp.get_data_into."""
+    from unitree_viser.render.async_render import ViserRenderThread
+
+    server = MagicMock()
+    server.get_clients.return_value = []
+
+    thread = ViserRenderThread(
+        server, MagicMock(), 0, MagicMock(), MagicMock(), MagicMock(), target_fps=20.0
+    )
+
+    with patch("mujoco_warp.get_data_into") as mock_get_data:
+        thread.start()
+        try:
+            time.sleep(0.3)
+            mock_get_data.assert_not_called()
+        finally:
+            thread.stop(timeout=1.0)
+
+
+def test_training_state_update_consume():
+    """TrainingState update/consume 基本逻辑."""
+    from unitree_viser.render.shared_state import TrainingState
+
+    state = TrainingState()
+    assert state.consume() is None  # 初始无 dirty
+
+    state.update(iteration=5, mean_reward=3.14, episode_length=100.0)
+    result = state.consume()
+    assert result is not None
+    assert result["iteration"] == 5
+    assert result["mean_reward"] == 3.14
+    assert result["episode_length"] == 100.0
+
+    # 消费后 dirty 清除
+    assert state.consume() is None
+
+    # 更新部分字段
+    state.update(iteration=6)
+    result = state.consume()
+    assert result["iteration"] == 6
+    assert result["mean_reward"] == 3.14  # 保持不变

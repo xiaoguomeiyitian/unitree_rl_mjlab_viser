@@ -24,7 +24,7 @@ class _ControlState:
 class TrainingController:
     """封装 Viser GUI 与训练循环的暂停/单步/速度控制."""
 
-    def __init__(self, server: "viser.ViserServer", fps: float = 10.0) -> None:
+    def __init__(self, server: "viser.ViserServer", fps: float = 30.0) -> None:
         self._server = server
         self._state = _ControlState(
             pause_event=threading.Event(),

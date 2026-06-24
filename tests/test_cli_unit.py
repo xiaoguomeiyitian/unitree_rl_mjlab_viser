@@ -31,7 +31,7 @@ def test_dataclass_train_args_defaults():
     assert args.task == "X"
     assert args.viser_port == 20006
     assert args.viser_env_idx == 0
-    assert args.viser_fps == 10.0
+    assert args.viser_fps == 30.0
     assert args.enable_control is False
     assert args.headless is False
     assert args.num_envs is None

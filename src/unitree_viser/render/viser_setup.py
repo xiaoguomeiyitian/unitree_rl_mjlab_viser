@@ -49,7 +49,7 @@ def setup_viser_for_training(
     port: int = 20006,
     env_idx: int = 0,
     enable_control: bool = False,
-    fps: float = 10.0,
+    fps: float = 30.0,
 ) -> tuple[viser.ViserServer, "ViserMujocoScene", ViserHandle, dict[str, Any]]:
     """初始化训练模式的 Viser 可视化.
 
@@ -126,6 +126,29 @@ def setup_viser_for_training(
         client.camera.position = np.array([3.0, -3.0, 2.0])
         client.camera.look_at = np.array([0.0, 0.0, 0.3])
 
+    # 创建 TrainingState 共享缓冲区 (主线程写, 渲染线程读)
+    from unitree_viser.render.shared_state import TrainingState
+
+    training_state = TrainingState()
+    gui_state["_training_state"] = training_state
+
+    # 创建 ViserRenderThread 实例 (尚未启动)
+    from unitree_viser.render.async_render import ViserRenderThread
+
+    render_thread = ViserRenderThread(
+        server=server,
+        scene=scene,
+        env_idx=env_idx,
+        mj_model=sim.mj_model,
+        mj_data=sim.mj_data,
+        sim=sim,
+        target_fps=fps,
+    )
+    render_thread.set_training_state(training_state)
+    render_thread.set_gui_state(gui_state)
+    gui_state["_render_thread"] = render_thread
+
+    # 向后兼容: 也创建 ViserHandle
     viser_handle = make_viser_handle(
         server=server,
         scene=scene,

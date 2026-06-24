@@ -35,6 +35,7 @@ class ViserRunner:
 
     viser_gui_state: dict | None = None
     training_controller: "TrainingController | None" = None
+    render_thread: Any = None  # ViserRenderThread 实例, 用于训练同步
     _post_iter_hooks: list[PostIterHook] = []
 
     def register_post_iter_hook(self, hook: PostIterHook) -> None:
@@ -76,14 +77,28 @@ class ViserRunner:
             self.logger.log = original_log  # type: ignore[assignment]
 
     def _trigger_post_iter_hooks(self, iteration: int, loss_dict: dict) -> None:
-        """触发所有注册的 post_iter hooks."""
-        self._default_post_iter_hook(iteration, 0.0, 0.0)
+        """触发所有注册的 post_iter hooks — 只写共享缓冲区, 不调 viser.
 
+        渲染线程负责消费 TrainingState 并更新 viser GUI.
+        如果启用了训练同步 (render_thread.sync_training), 等待渲染线程 tick.
+        """
+        # 训练同步: 等待渲染线程完成一帧 (浏览器连接后生效)
+        # 无浏览器连接时, 渲染线程不渲染, 主线程全速运行
+        if self.render_thread is not None and self.render_thread.is_rendering:
+            self.render_thread.wait_for_tick(timeout=1.0)
+            # 清除 tick_event, 等待下一帧
+            self.render_thread._tick_event.clear()
+
+        # 更新共享状态 (渲染线程负责更新 viser GUI)
+        self._update_training_state(iteration, loss_dict)
+
+        # 训练控制保留在主线程 (需要阻塞主线程)
         if self.training_controller is not None:
             should_quit = self.training_controller.wait_if_paused()
             if should_quit:
                 return
 
+        # 用户自定义 hooks
         if self._post_iter_hooks:
             env_unwrapped = self.env.unwrapped
             for hook in self._post_iter_hooks:
@@ -92,32 +107,44 @@ class ViserRunner:
                 except Exception as e:
                     print(f"[VISER] post_iter_hook 失败: {e}")
 
+    def _update_training_state(self, iteration: int, loss_dict: dict) -> None:
+        """更新 TrainingState 共享缓冲区 (渲染线程消费并更新 GUI)."""
+        if self.viser_gui_state is None:
+            return
+
+        training_state = self.viser_gui_state.get("_training_state")
+        if training_state is None:
+            return
+
+        # 从 loss_dict 提取 reward (如果有的话)
+        mean_reward = 0.0
+        episode_length = 0.0
+        if isinstance(loss_dict, dict):
+            mean_reward = float(loss_dict.get("reward", 0.0))
+            episode_length = float(loss_dict.get("episode_length", 0.0))
+
+        training_state.update(
+            iteration=iteration,
+            mean_reward=mean_reward,
+            episode_length=episode_length,
+        )
+
     def _default_post_iter_hook(
         self,
         iteration: int,
         mean_reward: float,
         episode_length: float,
     ) -> None:
-        """如果注册了 viser_gui_state, 更新 Info 面板和折线图."""
-        from unitree_viser.render.viser_setup import (
-            push_reward_to_plot,
-            update_training_info,
-        )
+        """deprecated: 保留用于向后兼容, 新代码通过渲染线程更新 GUI.
 
-        if self.viser_gui_state is None:
-            return
-
-        update_training_info(
-            self.viser_gui_state,
-            iteration=iteration,
-            mean_reward=mean_reward,
-            current_fps=None,
-        )
-        push_reward_to_plot(
-            self.viser_gui_state,
-            iteration=iteration,
-            mean_reward=mean_reward,
-            episode_length=episode_length,
+        此方法不再被 _trigger_post_iter_hooks 调用.
+        如需直接更新 GUI, 可手动调用.
+        """
+        # no-op: GUI 更新已移至渲染线程
+        # 保留方法签名以兼容可能的手动调用
+        print(
+            f"[VISER] _default_post_iter_hook 已废弃, "
+            f"GUI 更新由渲染线程负责 (iter={iteration})"
         )
 
     def _learn_fallback(
