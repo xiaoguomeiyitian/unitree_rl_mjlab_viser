@@ -94,20 +94,23 @@ detect_python() {
     if [ -x "$PROJECT_DIR/.venv/bin/python" ]; then
         PYTHON_BIN="$PROJECT_DIR/.venv/bin/python"
         PIP_BIN="$PROJECT_DIR/.venv/bin/pip"
-        VENV_LABEL="本地 venv (${PYTHON_BIN})"
-    elif [ -n "$SIBLING_GR00T_DIR" ] && [ -x "$SIBLING_GR00T_DIR/.venv/bin/python" ]; then
-        PYTHON_BIN="$SIBLING_GR00T_DIR/.venv/bin/python"
-        PIP_BIN="$SIBLING_GR00T_DIR/.venv/bin/pip"
-        VENV_LABEL="gr00t_mjlab_autodl venv (${PYTHON_BIN})"
-    elif command -v python3.12 &>/dev/null; then
-        PYTHON_BIN="$(command -v python3.12)"
-        PIP_BIN="$(command -v pip3.12)"
-        VENV_LABEL="系统 Python 3.12"
-    else
-        PYTHON_BIN="$(command -v python3)"
-        PIP_BIN="$(command -v pip3)"
-        VENV_LABEL="系统 Python ($(basename "$PYTHON_BIN"))"
-    fi
+		VENV_DIR="$PROJECT_DIR/.venv"
+		VENV_LABEL="本地 venv (${PYTHON_BIN})"
+	elif [ -n "$SIBLING_GR00T_DIR" ] && [ -x "$SIBLING_GR00T_DIR/.venv/bin/python" ]; then
+		PYTHON_BIN="$SIBLING_GR00T_DIR/.venv/bin/python"
+		PIP_BIN="$SIBLING_GR00T_DIR/.venv/bin/pip"
+		VENV_DIR="$SIBLING_GR00T_DIR/.venv"
+		VENV_LABEL="gr00t_mjlab_autodl venv (${PYTHON_BIN})"
+	elif command -v python3.12 &>/dev/null; then
+		PYTHON_BIN="$(command -v python3.12)"
+		PIP_BIN="$(command -v pip3.12)"
+		VENV_DIR=""
+		VENV_LABEL="系统 Python 3.12"
+	else
+		PYTHON_BIN="$(command -v python3)"
+		PIP_BIN="$(command -v pip3)"
+		VENV_DIR=""
+	fi
 }
 
 # ── 运行时环境自动检测 (GPU/CPU) ────────────────────────────────────
@@ -246,6 +249,8 @@ prompt_input() {
         echo "$v"; return
     done
 }
+
+# placeholder_for_fix
 
 prompt_yn() {
     local p="$1" d="${2:-y}"
