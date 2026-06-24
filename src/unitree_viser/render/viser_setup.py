@@ -100,6 +100,19 @@ def setup_viser_for_training(
     gui_state["info_html"] = info_html
     gui_state["reward_plotter"] = reward_plotter
 
+    # 多环境切换滑块 (当 num_envs > 1 时)
+    if env.num_envs > 1:
+        env_idx_slider = server.gui.add_slider(
+            "Env Index",
+            min=0,
+            max=env.num_envs - 1,
+            step=1,
+            initial_value=env_idx,
+        )
+        env_idx_slider.on_update(lambda _: None)  # 占位, 实际更新在 render 线程
+        gui_state["env_idx_slider"] = env_idx_slider
+        print(f"[VISER] 多环境切换滑块已启用 (0-{env.num_envs - 1})")
+
     if enable_control:
         from unitree_viser.train.training_controller import TrainingController
 
@@ -128,8 +141,11 @@ def setup_viser_for_training(
 def update_training_info(
     gui_state: dict[str, Any],
     iteration: int,
-    mean_reward: float | None,
-    current_fps: float | None,
+    mean_reward: float | None = None,
+    current_fps: float | None = None,
+    episode_length: float | None = None,
+    total_timesteps: int | None = None,
+    elapsed_s: float | None = None,
     extra_lines: list[str] | None = None,
 ) -> None:
     """更新 Info 面板的 HTML 内容.
@@ -139,17 +155,26 @@ def update_training_info(
         iteration: 当前训练迭代次数
         mean_reward: 最近一次迭代的平均 reward
         current_fps: 当前渲染 FPS
+        episode_length: 平均 episode 长度
+        total_timesteps: 总 timestep 数
+        elapsed_s: 已用时间 (秒)
         extra_lines: 额外的 HTML 行 (可选)
     """
     info_html = gui_state.get("info_html")
     if info_html is None:
         return
 
-    lines = [
-        f"Iteration: <b>{iteration}</b>",
-        f"Mean Reward: <b>{mean_reward:.3f}</b>" if mean_reward is not None else "Mean Reward: <b>--</b>",
-        f"Render FPS: <b>{current_fps:.1f}</b>" if current_fps is not None else "Render FPS: <b>--</b>",
-    ]
+    lines = [f"Iteration: <b>{iteration}</b>"]
+    if mean_reward is not None:
+        lines.append(f"Mean Reward: <b>{mean_reward:.3f}</b>")
+    if episode_length is not None:
+        lines.append(f"Episode Length: <b>{episode_length:.1f}</b>")
+    if total_timesteps is not None:
+        lines.append(f"Total Steps: <b>{total_timesteps:,}</b>")
+    if elapsed_s is not None:
+        lines.append(f"Elapsed: <b>{_format_duration(elapsed_s)}</b>")
+    if current_fps is not None:
+        lines.append(f"Render FPS: <b>{current_fps:.1f}</b>")
     if extra_lines:
         lines.extend(extra_lines)
 
@@ -158,6 +183,16 @@ def update_training_info(
         + "<br/>".join(lines)
         + "</div>"
     )
+
+
+def _format_duration(seconds: float) -> str:
+    """格式化秒数为可读字符串."""
+    if seconds < 60:
+        return f"{seconds:.0f}s"
+    elif seconds < 3600:
+        return f"{seconds / 60:.1f}m"
+    else:
+        return f"{seconds / 3600:.1f}h"
 
 
 def push_reward_to_plot(
@@ -176,3 +211,4 @@ def push_reward_to_plot(
         values["Episode Length"] = episode_length
 
     plotter.update(iteration=iteration, values=values)
+

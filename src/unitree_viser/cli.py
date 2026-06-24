@@ -127,6 +127,19 @@ class TrainArgs:
     headless: bool = False
     """完全跳过 Viser, 用 unitree_rl_mjlab 原版 train.py (用于 CI)"""
 
+    device: str = "auto"
+    """设备选择: ``auto`` (自动检测 GPU), ``cuda:0`` (强制 GPU), ``cpu`` (强制 CPU)"""
+
+    use_wandb: bool = False
+    """是否启用 wandb 日志记录 (默认关闭, 使用 tensorboard)"""
+
+    resume: bool = False
+    """是否从 checkpoint 恢复训练"""
+    checkpoint: str | None = None
+    """恢复训练时加载的 .pt checkpoint 路径 (必须与 --resume 同时使用)"""
+    resume_log_dir: str | None = None
+    """恢复训练时继续使用的日志目录 (None = 自动创建新目录)"""
+
 
 def run_train(args: TrainArgs) -> None:
     """训练模式主函数."""
@@ -170,8 +183,17 @@ def run_train(args: TrainArgs) -> None:
     if args.motion_file and is_tracking:
         env_cfg.commands["motion"].motion_file = args.motion_file
 
+    # 默认禁用 wandb (使用 tensorboard), 除非用户显式开启
+    if not args.use_wandb and agent_cfg.get("logger", "tensorboard") == "wandb":
+        agent_cfg["logger"] = "tensorboard"
+        print("[TRAIN] wandb 已默认禁用, 使用 tensorboard 日志 (--use-wandb 可开启)")
+
     import torch
-    device = "cuda:0" if torch.cuda.is_available() else "cpu"
+    if args.device == "auto":
+        device = "cuda:0" if torch.cuda.is_available() else "cpu"
+    else:
+        device = args.device
+    print(f"[TRAIN] 使用设备: {device}")
 
     env = ManagerBasedRlEnv(cfg=env_cfg, device=device)
     env = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.get("clip_actions", 1.0))
@@ -180,10 +202,21 @@ def run_train(args: TrainArgs) -> None:
 
     from datetime import datetime
     from pathlib import Path
-    log_dir = Path("logs") / "viser" / args.task / datetime.now().strftime("%Y%m%d_%H%M%S")
-    log_dir.mkdir(parents=True, exist_ok=True)
+    if args.resume and args.resume_log_dir:
+        log_dir = Path(args.resume_log_dir)
+        log_dir.mkdir(parents=True, exist_ok=True)
+    else:
+        log_dir = Path("logs") / "viser" / args.task / datetime.now().strftime("%Y%m%d_%H%M%S")
+        log_dir.mkdir(parents=True, exist_ok=True)
 
     runner = ViserRunnerCls(env, agent_cfg, str(log_dir), device)
+
+    # 恢复训练: 加载 checkpoint
+    if args.resume and args.checkpoint:
+        import torch as _torch
+        print(f"[TRAIN] 从 checkpoint 恢复: {args.checkpoint}")
+        runner.load(_torch.load(args.checkpoint, map_location=device, weights_only=False))
+        print(f"[TRAIN] 恢复完成, 从 iteration {runner.current_learning_iteration} 继续")
 
     viser_handle = None
     if not args.headless and args.viser_port > 0:
@@ -260,6 +293,9 @@ class SimArgs:
     headless: bool = False
     """不启动 Viser, 仅仿真 (用于测试)"""
 
+    device: str = "cpu"
+    """设备选择: ``auto`` (自动检测), ``cuda:0`` (强制 GPU), ``cpu`` (强制 CPU, 默认不占 GPU 显存)"""
+
 
 def run_sim(args: SimArgs) -> None:
     """仿真模式主函数."""
@@ -272,18 +308,27 @@ def run_sim(args: SimArgs) -> None:
     env_cfg.scene.num_envs = args.num_envs
 
     import torch
-    device = "cuda:0" if torch.cuda.is_available() else "cpu"
+    if args.device == "auto":
+        device = "cuda:0" if torch.cuda.is_available() else "cpu"
+    else:
+        device = args.device
+    print(f"[SIM] 使用设备: {device}")
     env = ManagerBasedRlEnv(cfg=env_cfg, device=device)
 
     policy = None
     if args.checkpoint:
         from mjlab.rl import MjlabOnPolicyRunner
         from mjlab.rl.vecenv_wrapper import RslRlVecEnvWrapper
+        from mjlab.tasks.registry import load_rl_cfg
         from unitree_viser.train.runner_subclass import make_viser_runner_cls
 
         env_wrapped = RslRlVecEnvWrapper(env, clip_actions=1.0)
+        # 加载完整 agent_cfg (包含 algorithm 等键)
+        agent_cfg = load_rl_cfg(args.task)
+        from dataclasses import asdict
+        agent_cfg = asdict(agent_cfg)
         ViserRunnerCls = make_viser_runner_cls(MjlabOnPolicyRunner)
-        runner = ViserRunnerCls(env_wrapped, {"max_iterations": 0}, None, device)
+        runner = ViserRunnerCls(env_wrapped, agent_cfg, None, device)
         runner.load(args.checkpoint)
         policy = runner.get_inference_policy(device=device)
         print(f"[SIM] 加载策略: {args.checkpoint}")

@@ -70,7 +70,9 @@ class ViserTermPlotter:
     def update(self, iteration: int, values: dict[str, float]) -> None:
         """把新的数据点推入折线图."""
         if self._mode == "mjlab":
-            self._impl.update(iteration=iteration, values=values)
+            import numpy as np
+            terms = [(name, np.array([val])) for name, val in values.items()]
+            self._impl.update(terms)
             return
 
         assert isinstance(self._impl, dict)

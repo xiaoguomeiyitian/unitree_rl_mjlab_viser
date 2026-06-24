@@ -1,7 +1,8 @@
-"""ViserRunner — MjlabOnPolicyRunner 子类, 加 on_iter 钩子.
+"""ViserRunner — 通过 monkey-patch 给任意 Runner 注入 on_iter 钩子.
 
-rsl_rl 的 ``OnPolicyRunner.learn()`` 没有回调机制. 本模块通过子类化 + 重写
-learn(), 在 ``self.logger.log(...)`` 之后插入 ``_post_iter_hook``.
+v2 改进: 不再完整复制 rsl_rl.OnPolicyRunner.learn(), 而是 monkey-patch
+``self.logger.log`` 在原始 log 之后触发 hooks. 上游 rsl_rl 升级时自动兼容.
+如果 monkey-patch 失败, 会 fallback 到 v1 的完整复制模式.
 """
 
 from __future__ import annotations
@@ -23,12 +24,17 @@ PostIterHook = Callable[[int, "ManagerBasedRlEnv", dict], None]
 
 
 class ViserRunner:
-    """Mixin 类 - 给 MjlabOnPolicyRunner 加 on_iter 钩子 + 暂停支持."""
+    """Mixin 类 - 给任意 Runner 加 on_iter 钩子 + 暂停支持.
+
+    使用方式:
+        ViserRunnerCls = make_viser_runner_cls(base_runner_cls)
+        runner = ViserRunnerCls(env, agent_cfg, log_dir, device)
+        runner.viser_gui_state = gui_state
+        runner.register_post_iter_hook(my_hook)
+    """
 
     viser_gui_state: dict | None = None
     training_controller: "TrainingController | None" = None
-    """可选的训练控制器 (暂停/单步/速度). 注入后才生效."""
-
     _post_iter_hooks: list[PostIterHook] = []
 
     def register_post_iter_hook(self, hook: PostIterHook) -> None:
@@ -38,14 +44,88 @@ class ViserRunner:
     def clear_post_iter_hooks(self) -> None:
         self._post_iter_hooks.clear()
 
-    # ── learn() — 复制 rsl_rl 主体, 加 2 处 [VISER] 改动 ────────────────────
+    # ── learn() — monkey-patch 方式 ─────────────────────────────────────────
 
     def learn(  # type: ignore[override]
         self,
         num_learning_iterations: int,
         init_at_random_ep_len: bool = False,
     ) -> None:
-        """复制 rsl_rl.OnPolicyRunner.learn(), 加 Viser 钩子."""
+        """在原始 learn() 基础上注入 Viser 钩子 (monkey-patch 方式)."""
+        # 保存原始 log 方法
+        original_log = self.logger.log
+        viser_self = self
+
+        def patched_log(**kwargs) -> None:
+            original_log(**kwargs)
+            it = kwargs.get("it", 0)
+            loss_dict = kwargs.get("loss_dict", {})
+            viser_self._trigger_post_iter_hooks(it, loss_dict)
+
+        self.logger.log = patched_log  # type: ignore[assignment]
+
+        try:
+            # 调用父类的原始 learn()
+            super().learn(num_learning_iterations, init_at_random_ep_len)
+        except Exception:
+            # monkey-patch 失败时 fallback 到 v1 完整复制
+            self.logger.log = original_log  # type: ignore[assignment]
+            self._learn_fallback(num_learning_iterations, init_at_random_ep_len)
+            return
+        finally:
+            self.logger.log = original_log  # type: ignore[assignment]
+
+    def _trigger_post_iter_hooks(self, iteration: int, loss_dict: dict) -> None:
+        """触发所有注册的 post_iter hooks."""
+        self._default_post_iter_hook(iteration, 0.0, 0.0)
+
+        if self.training_controller is not None:
+            should_quit = self.training_controller.wait_if_paused()
+            if should_quit:
+                return
+
+        if self._post_iter_hooks:
+            env_unwrapped = self.env.unwrapped
+            for hook in self._post_iter_hooks:
+                try:
+                    hook(iteration, env_unwrapped, loss_dict)
+                except Exception as e:
+                    print(f"[VISER] post_iter_hook 失败: {e}")
+
+    def _default_post_iter_hook(
+        self,
+        iteration: int,
+        mean_reward: float,
+        episode_length: float,
+    ) -> None:
+        """如果注册了 viser_gui_state, 更新 Info 面板和折线图."""
+        from unitree_viser.render.viser_setup import (
+            push_reward_to_plot,
+            update_training_info,
+        )
+
+        if self.viser_gui_state is None:
+            return
+
+        update_training_info(
+            self.viser_gui_state,
+            iteration=iteration,
+            mean_reward=mean_reward,
+            current_fps=None,
+        )
+        push_reward_to_plot(
+            self.viser_gui_state,
+            iteration=iteration,
+            mean_reward=mean_reward,
+            episode_length=episode_length,
+        )
+
+    def _learn_fallback(
+        self,
+        num_learning_iterations: int,
+        init_at_random_ep_len: bool = False,
+    ) -> None:
+        """Fallback: 完整复制 rsl_rl.OnPolicyRunner.learn() (v1 逻辑)."""
         try:
             from mjlab.utils.torch import check_nan
         except ImportError:
@@ -142,34 +222,6 @@ class ViserRunner:
                 os.path.join(self.logger.log_dir, f"model_{self.current_learning_iteration}.pt")
             )
             self.logger.stop_logging_writer()
-
-    def _default_post_iter_hook(
-        self,
-        iteration: int,
-        mean_reward: float,
-        episode_length: float,
-    ) -> None:
-        """如果注册了 viser_gui_state, 更新 Info 面板和折线图."""
-        from unitree_viser.render.viser_setup import (
-            push_reward_to_plot,
-            update_training_info,
-        )
-
-        if self.viser_gui_state is None:
-            return
-
-        update_training_info(
-            self.viser_gui_state,
-            iteration=iteration,
-            mean_reward=mean_reward,
-            current_fps=None,
-        )
-        push_reward_to_plot(
-            self.viser_gui_state,
-            iteration=iteration,
-            mean_reward=mean_reward,
-            episode_length=episode_length,
-        )
 
 
 def make_viser_runner_cls(base_runner_cls: type) -> type:

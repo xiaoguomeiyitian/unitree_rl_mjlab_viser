@@ -10,8 +10,7 @@
 #   sim     仿真模式 (浏览器中运行已训练策略 / 零动作)
 #   list    列出所有可用任务 ID
 #   test    运行 smoke test
-#   deps    检查/补全依赖
-#   version 显示项目版本和 venv 信息
+#   doctor  环境健康检查
 #
 # 兼容:
 #   - 自动检测本地 .venv 或复用 gr00t_mjlab_autodl/.venv (已有 torch+cu13)
@@ -25,7 +24,7 @@
 #   ./start.sh sim Unitree-Go2-Flat                  # 仿真 (zero policy)
 #   ./start.sh sim Unitree-G1-Flat --checkpoint model.pt
 #   ./start.sh test                                  # 跑 smoke test
-#   ./start.sh deps --install                        # 自动装依赖
+#   ./start.sh doctor                                # 环境健康检查
 # ============================================================================
 set -euo pipefail
 
@@ -53,11 +52,14 @@ MOTION_FILE=""
 LOG_ROOT=""
 RESUME="false"
 RESUME_CHECKPOINT=""
+TRAIN_DEVICE="cuda:0"   # 训练默认 GPU (若不可用则回退 cpu)
+USE_WANDB="false"         # 训练默认禁用 wandb (使用 tensorboard)
 
 # sim 专用
 CHECKPOINT=""
 POLICY="zero"          # zero | random
 NUM_ENVS_SIM="1"
+SIM_DEVICE="cpu"       # 仿真默认 CPU (不占 GPU 显存)
 INJECT_COMMANDS="true"
 COMMAND_NAME="twist"
 MAX_STEPS=""
@@ -265,8 +267,7 @@ show_usage() {
   sim       仿真模式 (浏览器中控制虚拟机器人)
   list      列出所有可用任务
   test      运行 smoke test
-  deps      检查/补全依赖
-  version   显示版本和环境信息
+  doctor    环境健康检查
 
 通用参数:
   --task <id>              任务 ID (e.g. Unitree-G1-Flat)
@@ -302,13 +303,9 @@ DDS 命令注入 (unitree_remote_ctrl 集成):
   --robot-key <key>        DDS topic 后缀 (默认 go2_0)
   --dds-timeout <sec>      DDS 消息超时 (默认 0.5s, 超时归零)
 
-依赖参数 (deps):
-  --install                自动 pip install 缺失依赖
-  --full                   装完整重型依赖 (torch + mjlab + mujoco-warp, ~3GB)
-
 示例:
   $0 list
-  $0 version
+  $0 doctor
   $0 train Unitree-G1-Flat --num-envs 64 --max-iterations 100
   $0 train Unitree-G1-Flat --viser-port 0 --num-envs 2048   # 无 Viser 训练
   $0 train Unitree-G1-Tracking-No-State-Estimation --motion-file dance1.npz
@@ -316,7 +313,6 @@ DDS 命令注入 (unitree_remote_ctrl 集成):
   $0 sim Unitree-G1-Flat --checkpoint logs/.../model_500.pt
   $0 sim Unitree-G1-Flat --policy random
   $0 test
-  $0 deps --install
 EOF
 }
 
@@ -341,6 +337,8 @@ build_cmd() {
             _opt log-root "$LOG_ROOT"
             _flag resume "$RESUME"
             _opt checkpoint "$RESUME_CHECKPOINT"
+            _opt device "$TRAIN_DEVICE"
+            _flag use-wandb "$USE_WANDB"
             ;;
         sim)
             CMD_ARGS="--task $TASK"
@@ -350,6 +348,7 @@ build_cmd() {
             _opt num-envs "$NUM_ENVS_SIM"
             _opt checkpoint "$CHECKPOINT"
             _opt policy "$POLICY"
+            _opt device "$SIM_DEVICE"
             # tyro 的 inject_commands: bool=True, 配套 --no-inject-commands
             [ "${INJECT_COMMANDS:-true}" = "false" ] && CMD_ARGS="$CMD_ARGS --no-inject-commands"
             _opt command-name "$COMMAND_NAME"
@@ -363,8 +362,7 @@ build_cmd() {
             ;;
         list)   CMD_ARGS="" ;;
         test)   CMD_ARGS="" ;;
-        deps)   CMD_ARGS="" ;;
-        version) CMD_ARGS="" ;;
+        doctor) CMD_ARGS="" ;;
     esac
 }
 
@@ -375,8 +373,7 @@ run_cmd() {
         sim)    log_info "启动仿真: unitree-viser cli sim-args $CMD_ARGS" ;;
         list)   log_info "列出可用任务" ;;
         test)   log_info "运行 smoke test" ;;
-        deps)   log_info "检查依赖" ;;
-        version) log_info "显示版本信息" ;;
+        doctor) log_info "环境健康检查" ;;
     esac
 
     # 自动检测 GPU/CPU 并设置运行时环境变量 (每次启动都跑)
@@ -427,38 +424,10 @@ run_cmd() {
         test)
             exec "$PYTHON_BIN" tests/test_smoke.py
             ;;
-        deps)
-            # ── 委托给 scripts/install_env.sh ──
-            # 原版的 install_viser_tyro / install_mjlab 已废弃:
-            #  - 只装 viser+tyro 不够 (缺 torch/warp/mjlab 全部)
-            #  - mjlab --no-deps 会破坏依赖图
-            # 新脚本: 自动检测 GPU → 选择 cu128/cpu wheel → 完整装好
-            local install_script="$SCRIPT_DIR/scripts/install_env.sh"
-            if [ ! -x "$install_script" ]; then
-                log_error "未找到 $install_script"
-                log_info "请确认仓库完整 (含 scripts/ 目录)"
-                exit 1
-            fi
-            # 透传参数: --install → install_env.sh 不识别, 改写为 --force-gpu
-            local install_args=()
-            for arg in "$@"; do
-                case "$arg" in
-                    --install)  install_args+=("--force-gpu") ;;  # 默认行为: 自动检测
-                    --full)     install_args+=("--force-gpu") ;;
-                    *)          install_args+=("$arg") ;;
-                esac
-            done
-            # 如果本项目 venv 不存在, 强制创建 (不询问)
-            if [ ! -d "$VENV_DIR" ]; then
-                install_args+=("--recreate")
-            fi
-            log_info "委托给 install_env.sh (自动检测 GPU/CPU)"
-            exec "$install_script" "${install_args[@]}"
-            ;;
-        version)
+        doctor)
             echo ""
             log_banner "═══ unitree_rl_mjlab_viser ═══"
-            "$PYTHON_BIN" -c "import unitree_viser; print(f'  version: {unitree_viser.__version__}')"
+            "$PYTHON_BIN" -c "import unitree_viser; print(f'  version: {unitree_viser.__version__}')" 2>/dev/null || echo "  version: N/A"
             echo "  Python:  $($PYTHON_BIN --version 2>&1)"
             echo "  venv:    $VENV_LABEL"
             echo "  sibling: $SIBLING_RL_DIR"
@@ -467,7 +436,6 @@ run_cmd() {
             log_banner "═══ 运行时环境 ═══"
             echo "  MUJOCO_GL:           ${MUJOCO_GL:-<未设置>}"
             echo "  CUDA_VISIBLE_DEVICES: '${CUDA_VISIBLE_DEVICES:-<未设置>}'"
-            # 显示检测到的 GPU 信息 (即使未设置 MUJOCO_GL)
             if command -v nvidia-smi &>/dev/null; then
                 local gpu_info
                 gpu_info=$(nvidia-smi --query-gpu=name,driver_version --format=csv,noheader 2>/dev/null | head -1)
@@ -478,7 +446,6 @@ run_cmd() {
             echo ""
             log_banner "═══ 关键依赖 ═══"
             for pkg in viser tyro mjlab torch mujoco warp rsl_rl_lib mujoco_warp; do
-                # pip 包名 vs import 名映射
                 case "$pkg" in
                     rsl_rl_lib) import_pkg="rsl_rl"; metadata_pkg="rsl-rl-lib" ;;
                     warp)       import_pkg="warp"; metadata_pkg="warp-lang" ;;
@@ -487,13 +454,11 @@ run_cmd() {
                 esac
                 ver=$("$PYTHON_BIN" -c "
 import importlib, importlib.metadata as md
-# 优先 metadata (不需要 import,避免 mjlab 触发 warp 依赖)
 try:
     print(md.version('$metadata_pkg'))
     raise SystemExit(0)
 except Exception:
     pass
-# 回退到 import __version__
 try:
     m = importlib.import_module('$import_pkg')
     print(getattr(m, '__version__', 'unknown'))
@@ -503,6 +468,7 @@ except Exception as e:
                 printf "  %-15s %s\n" "$pkg:" "$ver"
             done
             echo ""
+            log_info "环境健康检查完成"
             ;;
     esac
 }
@@ -516,15 +482,13 @@ select_mode() {
         "sim    — 仿真 (浏览器驱动虚拟机器人)" \
         "list   — 列出所有可用任务 ID" \
         "test   — 运行 smoke test" \
-        "deps   — 检查/补全依赖" \
-        "version — 显示版本和环境信息")
+        "doctor — 环境健康检查")
     case $idx in
         0) MODE="train" ;;
         1) MODE="sim" ;;
         2) MODE="list" ;;
         3) MODE="test" ;;
-        4) MODE="deps" ;;
-        5) MODE="version" ;;
+        4) MODE="doctor" ;;
     esac
     log_info "已选择: $MODE"
 }
@@ -718,37 +682,123 @@ _select_task_from_list() {
     TASK="${tasks[$idx]}"
 }
 
-config_train() {
-    select_task
-
-    # Viser 选项
-    if [ "$(prompt_yn "启用 Viser 浏览器可视化?" "y")" = "true" ]; then
-        VISER_PORT=$(prompt_input "Viser 端口" "20006")
-        VISER_FPS=$(prompt_input "Viser FPS" "10")
-        if [ "$(prompt_yn "启用训练控制 (暂停/单步/速度)?" "y")" = "true" ]; then
-            ENABLE_CONTROL="true"
+# ── 扫描已有训练模型 (用于恢复训练) ──────────────────────────────────────
+SCAN_MODELS=()
+SCAN_MODEL_PATHS=()
+scan_train_models() {
+    SCAN_MODELS=(); SCAN_MODEL_PATHS=()
+    local log_base="logs/viser"
+    [ -d "$log_base" ] || return 0
+    while IFS= read -r run_dir; do
+        local best_model="" best_iter=-1
+        while IFS= read -r f; do
+            local fname; fname=$(basename "$f")
+            if [[ "$fname" =~ ^model_([0-9]+) ]]; then
+                local iter="${BASH_REMATCH[1]}"
+                if [ "$iter" -gt "$best_iter" ]; then best_iter="$iter"; best_model="$f"; fi
+            fi
+        done < <(find "$run_dir" -maxdepth 1 -name "model_*.pt" 2>/dev/null || true)
+        if [ -n "$best_model" ]; then
+            SCAN_MODELS+=("$(basename "$run_dir") — $(basename "$best_model") (iter $best_iter)")
+            SCAN_MODEL_PATHS+=("$best_model")
         fi
-    else
-        HEADLESS="true"
-    fi
+    done < <(find "$log_base" -maxdepth 1 -mindepth 1 -type d 2>/dev/null | sort -r || true)
+}
 
-    # 训练超参
-    echo ""
-    local idx=$(prompt_select "选择配置模板:" "快速 (64 envs, 100 iters)" "小规模 (512, 5000)" "标准 (1024, 10000)" "大规模 (2048, 20000)" "自定义")
-    case $idx in
-        0) NUM_ENVS=64;  MAX_ITERATIONS=100  ;;
-        1) NUM_ENVS=512; MAX_ITERATIONS=5000 ;;
-        2) NUM_ENVS=1024; MAX_ITERATIONS=10000 ;;
-        3) NUM_ENVS=2048; MAX_ITERATIONS=20000 ;;
-        4)
-            NUM_ENVS=$(prompt_input "环境数" "1024")
-            MAX_ITERATIONS=$(prompt_input "最大迭代" "10000")
-            SEED=$(prompt_input "随机种子" "42")
-            SAVE_INTERVAL=$(prompt_input "保存间隔" "100")
+config_train() {
+    # ── 1. 选择机器人类型 ──
+    echo ""; log_banner "── 机器人选择 ──"; echo ""
+    local ROBOT_OPTS=("Go2 (四足)" "G1 (人形 29Dof)" "G1-23Dof (人形 23Dof)" "H1-2 (人形)" "H1 (人形)" "H2 (人形)" "A2 (四足)" "AS2 (四足)" "R1 (人形)")
+    local ROBOT_VALS=("Go2" "G1" "G1-23Dof" "H1_2" "H1" "H2" "A2" "AS2" "R1")
+    local ri=$(prompt_select "选择机器人:" "${ROBOT_OPTS[@]}")
+    local ROBOT_TYPE="${ROBOT_VALS[$ri]}"
+    log_info "机器人: $ROBOT_TYPE"
+
+    # ── 2. 选择地形/任务类别 ──
+    echo ""; log_banner "── 任务类别选择 ──"; echo ""
+    local TERRAIN_OPTS=("velocity — 速度控制 (vx/vy/wz 命令)" "tracking — 运动跟踪 (参考 motion 复现)")
+    local TERRAIN_VALS=("velocity" "tracking")
+    local ti=$(prompt_select "选择任务类别:" "${TERRAIN_OPTS[@]}")
+    local TERRAIN_TYPE="${TERRAIN_VALS[$ti]}"
+    log_info "任务类别: $TERRAIN_TYPE"
+
+    # ── 3. 根据机器人+地形自动推导任务 ID ──
+    case "$TERRAIN_TYPE" in
+        velocity)
+            # velocity: 选地形
+            echo ""
+            local terrain_opts=("Flat — 平坦地形" "Rough — 崎岖地形")
+            local terrain_vals=("Flat" "Rough")
+            local tti=$(prompt_select "选择地形:" "${terrain_opts[@]}")
+            TASK="Unitree-${ROBOT_TYPE}-${terrain_vals[$tti]}"
+            ;;
+        tracking)
+            # tracking: 选是否带状态估计
+            echo ""
+            local track_opts=("Tracking — 标准模式" "Tracking-No-State-Estimation — 无状态估计")
+            local track_vals=("Tracking" "Tracking-No-State-Estimation")
+            local tti=$(prompt_select "选择跟踪模式:" "${track_opts[@]}")
+            TASK="Unitree-${ROBOT_TYPE}-${track_vals[$tti]}"
             ;;
     esac
+    log_info "任务: $TASK ($(get_task_label "$TASK"))"
 
-    # tracking 任务需要 motion file
+    # ── 4. 恢复训练选项 ──
+    echo ""
+    RESUME="false"; RESUME_CHECKPOINT=""
+    scan_train_models
+    if [ ${#SCAN_MODELS[@]} -gt 0 ]; then
+        local opts=("${SCAN_MODELS[@]}" "从头开始 (不加载)")
+        local mi=$(prompt_select "发现已有训练记录:" "${opts[@]}")
+        if [ "$mi" -lt "${#SCAN_MODELS[@]}" ]; then
+            RESUME="true"
+            RESUME_CHECKPOINT="${SCAN_MODEL_PATHS[$mi]}"
+            log_info "恢复训练: $RESUME_CHECKPOINT"
+        else
+            log_info "从头开始"
+        fi
+    else
+        log_info "无训练记录, 从头开始"
+    fi
+
+    # ── 5. 训练超参 (直接输入) ──
+    echo ""; log_banner "── 训练超参配置 ──"; echo ""
+    MAX_ITERATIONS=$(prompt_input "最大迭代次数" "10000")
+    NUM_ENVS=$(prompt_input "并行环境数" "1024")
+    log_info "环境数: $NUM_ENVS, 迭代: $MAX_ITERATIONS"
+
+    # ── 6. Viser 选项 (默认启用, 只问端口号) ──
+    echo ""
+    VISER_PORT=$(prompt_input "Viser 端口" "20006")
+    if [ "$(prompt_yn "启用训练控制 (暂停/单步/速度)?" "y")" = "true" ]; then
+        ENABLE_CONTROL="true"
+    fi
+
+    # ── 7. wandb 选项 ──
+    echo ""
+    if [ "$(prompt_yn "启用 wandb 日志记录?" "n")" = "true" ]; then
+        USE_WANDB="true"
+    else
+        USE_WANDB="false"
+    fi
+
+    # ── 8. 设备选择 (默认 GPU, 无 GPU 则跳过) ──
+    echo ""
+    if command -v nvidia-smi &>/dev/null && nvidia-smi &>/dev/null; then
+        local gpu_name
+        gpu_name=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1 | tr -d ' ')
+        log_info "检测到 NVIDIA GPU: $gpu_name"
+        if [ "$(prompt_yn "训练使用 GPU (cuda:0)?" "y")" = "true" ]; then
+            TRAIN_DEVICE="cuda:0"
+        else
+            TRAIN_DEVICE="cpu"
+        fi
+    else
+        TRAIN_DEVICE="cpu"
+        log_info "未检测到 NVIDIA GPU, 训练使用 CPU (跳过选择)"
+    fi
+
+    # ── 9. tracking 任务需要 motion file ──
     if [[ "$TASK" == *"-Tracking"* ]]; then
         echo ""
         log_warn "Tracking 任务需要 motion 文件 (.npz)"
@@ -785,6 +835,22 @@ config_sim() {
     if [ -z "$CHECKPOINT" ]; then
         local idx=$(prompt_select "无 checkpoint, 使用什么策略?" "zero (零动作, 站立)" "random (随机动作)")
         case $idx in 0) POLICY="zero" ;; 1) POLICY="random" ;; esac
+    fi
+
+    # 设备选择 (默认 CPU, 不占 GPU 显存; 无 GPU 则跳过)
+    echo ""
+    if command -v nvidia-smi &>/dev/null && nvidia-smi &>/dev/null; then
+        local gpu_name
+        gpu_name=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1 | tr -d ' ')
+        log_info "检测到 NVIDIA GPU: $gpu_name"
+        if [ "$(prompt_yn "仿真使用 CPU (推荐, 不占 GPU 显存)?" "y")" != "true" ]; then
+            SIM_DEVICE="cuda:0"
+        else
+            SIM_DEVICE="cpu"
+        fi
+    else
+        SIM_DEVICE="cpu"
+        log_info "未检测到 NVIDIA GPU, 仿真使用 CPU (跳过选择)"
     fi
 
     if [ "$(prompt_yn "启用 Viser 浏览器可视化?" "y")" = "true" ]; then
@@ -836,12 +902,15 @@ confirm_and_start() {
             if [ "$RESUME" = "true" ]; then
                 echo -e "  恢复训练:   ${BOLD}是${NC} ($RESUME_CHECKPOINT)"
             fi
+            echo -e "  设备:       ${BOLD}${TRAIN_DEVICE}${NC}"
+            echo -e "  wandb:      ${BOLD}$([ "$USE_WANDB" = "true" ] && echo "启用" || echo "禁用 (tensorboard)")${NC}"
             ;;
         sim)
             echo -e "  模式:       ${BOLD}sim${NC}"
             echo -e "  任务:       ${BOLD}${TASK}${NC}"
             echo -e "  策略:       ${BOLD}${CHECKPOINT:-$POLICY policy}${NC}"
             echo -e "  环境数:     ${BOLD}${NUM_ENVS_SIM}${NC}"
+            echo -e "  设备:       ${BOLD}${SIM_DEVICE}${NC}"
             echo -e "  Viser:      ${BOLD}$([ "$HEADLESS" = "true" ] && echo "禁用" || echo "http://localhost:$VISER_PORT")${NC}"
             if [ "$INJECT_COMMANDS" = "true" ] && [ "$HEADLESS" != "true" ]; then
                 echo -e "  命令注入:   ${BOLD}启用${NC} (${COMMAND_NAME})"
@@ -856,8 +925,7 @@ confirm_and_start() {
             ;;
         list)    echo -e "  模式:       ${BOLD}list${NC}" ;;
         test)    echo -e "  模式:       ${BOLD}test${NC}" ;;
-        deps)    echo -e "  模式:       ${BOLD}deps${NC}  install=$DEPS_INSTALL full=$DEPS_FULL" ;;
-        version) echo -e "  模式:       ${BOLD}version${NC}" ;;
+        doctor)  echo -e "  模式:       ${BOLD}doctor${NC}" ;;
     esac
     echo -e "  Python:     ${BOLD}${VENV_LABEL}${NC}"
     echo ""
@@ -892,22 +960,21 @@ if [ $# -eq 0 ]; then
     echo ""
     log_info "Python:    $VENV_LABEL"
     log_info "兄弟项目:  $SIBLING_RL_DIR"
-    [ -n "$SIBLING_GR00T_DIR" ] && log_info "复用 venv: $SIBLING_GR00T_DIR"
     echo ""
-    check_core_deps || log_warn "依赖不全, 可用: $0 deps --install"
+    check_core_deps || log_warn "依赖不全, 可用: $0 doctor"
     echo ""
     select_mode
     case "$MODE" in
         train)   config_train ;;
         sim)     config_sim ;;
-        deps)    config_deps ;;
+        doctor)  ;;
     esac
     confirm_and_start
     run_cmd
 else
     # ── 非交互式 ──
     case "${1:-}" in
-        train|sim|list|test|deps|version) MODE="$1"; shift ;;
+        train|sim|list|test|doctor) MODE="$1"; shift ;;
         -h|--help|help) show_usage; exit 0 ;;
         *) log_error "未知模式: $1"; show_usage; exit 1 ;;
     esac
@@ -932,6 +999,7 @@ else
             --resume)           RESUME="true"; shift 1 ;;
             --checkpoint)       CHECKPOINT="$2"; RESUME_CHECKPOINT="$2"; shift 2 ;;
             --log-root)         LOG_ROOT="$2"; shift 2 ;;
+            --use-wandb)        USE_WANDB="true"; shift 1 ;;
             # sim
             --policy)           POLICY="$2"; shift 2 ;;
             --no-inject-commands) INJECT_COMMANDS="false"; shift 1 ;;
@@ -944,9 +1012,12 @@ else
             --robot-key)        ROBOT_KEY="$2"; shift 2 ;;
             --dds-timeout)      DDS_TIMEOUT="$2"; shift 2 ;;
             --max-steps)        MAX_STEPS="$2"; shift 2 ;;
-            # deps
-            --install)          DEPS_INSTALL="true"; shift 1 ;;
-            --full)             DEPS_FULL="true"; shift 1 ;;
+            # device (train/sim 通用)
+            --device)
+                if [ "$MODE" = "sim" ]; then SIM_DEVICE="$2"; else TRAIN_DEVICE="$2"; fi
+                shift 2 ;;
+            # doctor (无额外参数)
+            -h|--help|help)     show_usage; exit 0 ;;
             # help
             -h|--help|help)     show_usage; exit 0 ;;
             *)
