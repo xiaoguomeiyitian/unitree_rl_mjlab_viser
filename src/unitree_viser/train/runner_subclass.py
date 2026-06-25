@@ -35,7 +35,11 @@ class ViserRunner:
 
     viser_gui_state: dict | None = None
     training_controller: "TrainingController | None" = None
-    _post_iter_hooks: list[PostIterHook] = []
+
+    def __init__(self, *args, **kwargs):
+        """初始化实例级可变属性, 避免类级共享."""
+        self._post_iter_hooks: list[PostIterHook] = []
+        super().__init__(*args, **kwargs)
 
     def register_post_iter_hook(self, hook: PostIterHook) -> None:
         """注册一个 iter 结束后的钩子."""
@@ -67,8 +71,14 @@ class ViserRunner:
         try:
             # 调用父类的原始 learn()
             super().learn(num_learning_iterations, init_at_random_ep_len)
-        except Exception:
+        except Exception as _e:
             # monkey-patch 失败时 fallback 到 v1 完整复制
+            # 注意: 这里记录异常以帮助调试, 避免静默掩盖真实 bug
+            import traceback
+            print(
+                f"[VISER] ⚠️ super().learn() 异常, fallback 到 v1 模式: {_e}"
+            )
+            traceback.print_exc()
             self.logger.log = original_log  # type: ignore[assignment]
             self._learn_fallback(num_learning_iterations, init_at_random_ep_len)
             return
@@ -132,11 +142,7 @@ class ViserRunner:
         如需直接更新 GUI, 可手动调用.
         """
         # no-op: GUI 更新已移至渲染线程
-        # 保留方法签名以兼容可能的手动调用
-        print(
-            f"[VISER] _default_post_iter_hook 已废弃, "
-            f"GUI 更新由渲染线程负责 (iter={iteration})"
-        )
+        pass
 
     def _learn_fallback(
         self,

@@ -78,6 +78,8 @@ class TrainingController:
     def wait_if_paused(self) -> bool:
         """如果处于暂停状态, 阻塞直到恢复.
 
+        使用事件阻塞而非轮询, 减少 CPU 开销.
+
         Returns:
             True 如果用户请求退出.
         """
@@ -89,8 +91,10 @@ class TrainingController:
             self._state.pause_event.set()
             return False
 
+        # 使用事件阻塞等待, 而非轮询
         while self._state.pause_event.is_set() and not self._state.quit_requested:
-            self._state.wakeup_event.wait(timeout=0.05)
+            # 等待 wakeup_event 或超时检查 quit_requested
+            self._state.wakeup_event.wait(timeout=0.2)
             self._state.wakeup_event.clear()
         return self._state.quit_requested
 

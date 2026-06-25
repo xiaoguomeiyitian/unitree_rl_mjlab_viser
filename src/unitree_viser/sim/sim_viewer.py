@@ -45,10 +45,15 @@ def _zero_policy(obs: Any) -> torch.Tensor:
     return torch.zeros(n, 12, device=actor_obs.device)
 
 
-def _random_policy(obs: Any) -> torch.Tensor:
-    """Random policy - 输出 [-1, 1] 之间的随机动作 (默认 12 DOF)."""
+def _random_policy(obs: Any, num_actions: int = 12) -> torch.Tensor:
+    """Random policy - 输出 [-1, 1] 之间的随机动作.
+
+    Args:
+        obs: 观测值
+        num_actions: 动作维度 (默认 12 DOF, 适用于 G1/Go2)
+    """
     actor_obs = _extract_actor_obs(obs)
-    return torch.rand(actor_obs.shape[0], 12, device=actor_obs.device) * 2 - 1
+    return torch.rand(actor_obs.shape[0], num_actions, device=actor_obs.device) * 2 - 1
 
 
 def _make_typed_policy(base_policy, num_actions: int):
@@ -211,8 +216,12 @@ class SimViewer:
             )
 
     def run(self, max_steps: int | None = None) -> None:
-        """主循环 - 持续 stepping + 推送到 Viser."""
-        import mujoco_warp as mjwarp
+        """主循环 - 持续 stepping + 推送到 Viser.
+
+        使用 mj_forward (CPU) 同步渲染数据, 与训练路径 ViserRenderThread 一致.
+        避免 mjwarp.get_data_into() 的全量 GPU→CPU 传输, 减少延迟.
+        """
+        import mujoco as mj
 
         assert self._scene is not None, "call setup() first"
 
@@ -220,6 +229,9 @@ class SimViewer:
         sim = self._env.sim
         target_fps = 30.0
         last_render_t = 0.0
+
+        # 创建独立的 mj_data 用于渲染, 避免与训练/仿真线程冲突
+        mj_data_render = mj.MjData(sim.mj_model)
 
         try:
             while not self._should_stop:
@@ -241,13 +253,10 @@ class SimViewer:
                 now = time.time()
                 if now - last_render_t >= 1.0 / target_fps:
                     try:
-                        mjwarp.get_data_into(
-                            sim.mj_data,
-                            sim.mj_model,
-                            sim.wp_data,
-                            world_id=self._env_idx,
-                        )
-                        self._scene.update_from_mjdata(sim.mj_data)
+                        # 轻量同步: 拷贝 qpos + mj_forward 计算派生量
+                        mj_data_render.qpos[:] = sim.mj_data.qpos
+                        mj.mj_forward(sim.mj_model, mj_data_render)
+                        self._scene.update_from_mjdata(mj_data_render)
                     except Exception as e:
                         print(f"[SIM] 渲染失败: {e}")
                     last_render_t = now

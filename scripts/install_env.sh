@@ -94,7 +94,6 @@ DRIVER_VER=""
 PYTHON_BIN=""
 PYTHON_VER=""
 SELECTED_MODE=""        # 最终选择的模式: "gpu" | "cpu"
-PYTHON_VERSION="3.10"
 
 # ── 用法说明 ────────────────────────────────────────────────────────────
 usage() {

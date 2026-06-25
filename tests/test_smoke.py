@@ -66,13 +66,10 @@ def test_train_module_api():
 
     assert ViserRunner is not None
     assert callable(make_viser_runner_cls)
-    # 测试钩子列表初始为空
-    assert hasattr(ViserRunner, "_post_iter_hooks")
-    assert isinstance(ViserRunner._post_iter_hooks, list)
+    # _post_iter_hooks 现在是实例属性 (在 __init__ 中初始化), 不再是类属性
     # 验证 register/clear 方法存在
     assert callable(getattr(ViserRunner, "register_post_iter_hook", None))
     assert callable(getattr(ViserRunner, "clear_post_iter_hooks", None))
-    print("✓ train.runner_subclass: ViserRunner + hook API works")
     print("✓ train.runner_subclass: ViserRunner + hook API works")
 
 

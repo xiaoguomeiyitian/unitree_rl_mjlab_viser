@@ -34,6 +34,7 @@ class ViserTermPlotter:
         self._term_names = list(term_names)
         self._name = name
         self._server = server
+        self._buffers: dict[str, tuple[list[int], list[float]]] = {}
 
         mjlab_plotter = _try_import_mjlab_plotter()
         if mjlab_plotter is not None:

@@ -113,6 +113,10 @@ class ViserRenderThread:
         self._training_state: Any = None  # TrainingState | None
         self._gui_state: dict | None = None  # 用于 GUI 更新
 
+        # 训练同步模式 (set_sync_training 动态控制)
+        self._sync_training: bool = False
+        self._tick_event = threading.Event()
+
 
 
     # ── 公共 API ───────────────────────────────────────────────────────────
@@ -133,7 +137,8 @@ class ViserRenderThread:
         """停止渲染线程 (幂等)."""
         if self._thread is None:
             return
-        self._stop_event.set()
+        with self._data_lock:
+            self._stop_event.set()
         if self._thread.is_alive():
             self._thread.join(timeout=timeout)
         self._thread = None
@@ -237,6 +242,9 @@ class ViserRenderThread:
         connected_fps = min(self._target_fps, 30.0)
         connected_interval = 1.0 / connected_fps
 
+        # 持久错误退出阈值
+        _MAX_CONSECUTIVE_ERRORS = 10
+
         while not self._stop_event.is_set():
             try:
                 # 检查浏览器连接
@@ -298,6 +306,13 @@ class ViserRenderThread:
                     traceback.print_exc()
                 elif self._error_count == 4:
                     print("[RENDER] 渲染异常已达 3 次, 静默忽略后续错误...")
+                elif self._error_count >= _MAX_CONSECUTIVE_ERRORS:
+                    print(
+                        f"[RENDER] 连续异常已达 {_MAX_CONSECUTIVE_ERRORS} 次, "
+                        f"渲染线程退出. 最后错误: {e}"
+                    )
+                    self._stop_event.set()
+                    break
                 _time.sleep(min(0.5 * self._error_count, 5.0))
 
     def _consume_training_state(self) -> dict | None:

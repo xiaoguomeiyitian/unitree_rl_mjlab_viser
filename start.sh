@@ -250,7 +250,6 @@ prompt_input() {
     done
 }
 
-# placeholder_for_fix
 
 prompt_yn() {
     local p="$1" d="${2:-y}"
@@ -818,22 +817,69 @@ config_train() {
 }
 
 config_sim() {
-    select_task
+    # ── 1. 选择机器人类型 (与 train 一致) ──
+    echo ""; log_banner "── 机器人选择 ──"; echo ""
+    local ROBOT_OPTS=("Go2 (四足)" "G1 (人形 29Dof)" "G1-23Dof (人形 23Dof)" "H1-2 (人形)" "H1 (人形)" "H2 (人形)" "A2 (四足)" "AS2 (四足)" "R1 (人形)")
+    local ROBOT_VALS=("Go2" "G1" "G1-23Dof" "H1_2" "H1" "H2" "A2" "AS2" "R1")
+    local ri=$(prompt_select "选择机器人:" "${ROBOT_OPTS[@]}")
+    local ROBOT_TYPE="${ROBOT_VALS[$ri]}"
+    log_info "机器人: $ROBOT_TYPE"
 
-    # checkpoint
+    # ── 2. 选择任务类别 (与 train 一致) ──
+    echo ""; log_banner "── 任务类别选择 ──"; echo ""
+    local TERRAIN_OPTS=("velocity — 速度控制 (vx/vy/wz 命令)" "tracking — 运动跟踪 (参考 motion 复现)")
+    local TERRAIN_VALS=("velocity" "tracking")
+    local ti=$(prompt_select "选择任务类别:" "${TERRAIN_OPTS[@]}")
+    local TERRAIN_TYPE="${TERRAIN_VALS[$ti]}"
+    log_info "任务类别: $TERRAIN_TYPE"
+
+    # ── 3. 根据机器人+地形自动推导任务 ID (与 train 一致) ──
+    case "$TERRAIN_TYPE" in
+        velocity)
+            # velocity: 选地形
+            echo ""
+            local terrain_opts=("Flat — 平坦地形" "Rough — 崎岖地形")
+            local terrain_vals=("Flat" "Rough")
+            local tti=$(prompt_select "选择地形:" "${terrain_opts[@]}")
+            TASK="Unitree-${ROBOT_TYPE}-${terrain_vals[$tti]}"
+            ;;
+        tracking)
+            # tracking: 选是否带状态估计
+            echo ""
+            local track_opts=("Tracking — 标准模式" "Tracking-No-State-Estimation — 无状态估计")
+            local track_vals=("Tracking" "Tracking-No-State-Estimation")
+            local tti=$(prompt_select "选择跟踪模式:" "${track_opts[@]}")
+            TASK="Unitree-${ROBOT_TYPE}-${track_vals[$tti]}"
+            ;;
+    esac
+    log_info "任务: $TASK ($(get_task_label "$TASK"))"
+
+    # ── 4. checkpoint / 策略选择 (只展示与当前任务匹配的 checkpoint) ──
     echo ""
     local ckpt_default=""
     if [ -d "logs" ]; then
-        ckpt_default=$(find logs -name "model_*.pt" 2>/dev/null | sort -V | tail -1 || echo "")
+        # 优先找与当前任务完全匹配的 checkpoint
+        ckpt_default=$(find "logs/viser/$TASK" -name "model_*.pt" 2>/dev/null | sort -V | tail -1 || echo "")
+        # 如果没有精确匹配, 找同机器人的 checkpoint
+        if [ -z "$ckpt_default" ]; then
+            local robot_prefix="${TASK#Unitree-}"  # 去掉 Unitree- 前缀
+            robot_prefix="${robot_prefix%%-*}"     # 取机器人类型 (Go2, G1, G1-23Dof 等)
+            # 处理 G1-23Dof 这种带横杠的机器人名
+            if [[ "$TASK" == Unitree-G1-23Dof* ]]; then
+                robot_prefix="G1-23Dof"
+            fi
+            ckpt_default=$(find "logs/viser" -path "*/Unitree-${robot_prefix}-*/model_*.pt" 2>/dev/null | sort -V | tail -1 || echo "")
+        fi
     fi
     if [ -n "$ckpt_default" ]; then
-        log_info "找到最新训练产物: $ckpt_default"
+        log_info "找到匹配的训练产物: $ckpt_default"
         if [ "$(prompt_yn "使用此模型?" "y")" = "true" ]; then
             CHECKPOINT="$ckpt_default"
         else
             CHECKPOINT=$(prompt_input "Checkpoint 路径 (留空用 zero policy)" "")
         fi
     else
+        log_info "未找到匹配任务的 checkpoint"
         CHECKPOINT=$(prompt_input "Checkpoint 路径 (留空用 zero policy)" "")
     fi
 
@@ -842,7 +888,7 @@ config_sim() {
         case $idx in 0) POLICY="zero" ;; 1) POLICY="random" ;; esac
     fi
 
-    # 设备选择 (默认 CPU, 不占 GPU 显存; 无 GPU 则跳过)
+    # ── 5. 设备选择 (默认 CPU, 不占 GPU 显存; 无 GPU 则跳过) ──
     echo ""
     if command -v nvidia-smi &>/dev/null && nvidia-smi &>/dev/null; then
         local gpu_name
@@ -858,6 +904,8 @@ config_sim() {
         log_info "未检测到 NVIDIA GPU, 仿真使用 CPU (跳过选择)"
     fi
 
+    # ── 6. Viser 选项 ──
+    echo ""
     if [ "$(prompt_yn "启用 Viser 浏览器可视化?" "y")" = "true" ]; then
         VISER_PORT=$(prompt_input "Viser 端口" "20006")
         if [ "$(prompt_yn "启用命令注入 (vx/vy/wz 滑块)?" "y")" = "true" ]; then
@@ -869,6 +917,7 @@ config_sim() {
         HEADLESS="true"
     fi
 
+    # ── 7. 最大步数 ──
     MAX_STEPS=$(prompt_input "最大步数 (留空=无限)" "")
 }
 

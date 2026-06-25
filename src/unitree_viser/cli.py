@@ -324,12 +324,11 @@ def run_sim(args: SimArgs) -> None:
         from mjlab.rl.vecenv_wrapper import RslRlVecEnvWrapper
         from mjlab.tasks.registry import load_rl_cfg
         from unitree_viser.train.runner_subclass import make_viser_runner_cls
+        from dataclasses import asdict
 
         env_wrapped = RslRlVecEnvWrapper(env, clip_actions=1.0)
-        # 加载完整 agent_cfg (包含 algorithm 等键)
-        agent_cfg = load_rl_cfg(args.task)
-        from dataclasses import asdict
-        agent_cfg = asdict(agent_cfg)
+        # 加载完整 agent_cfg (包含 algorithm 等键), 统一转为 dict
+        agent_cfg = asdict(load_rl_cfg(args.task))
         ViserRunnerCls = make_viser_runner_cls(MjlabOnPolicyRunner)
         runner = ViserRunnerCls(env_wrapped, agent_cfg, None, device)
         runner.load(args.checkpoint)
@@ -374,8 +373,9 @@ def run_sim(args: SimArgs) -> None:
                 dds_injector = None
 
         obs, _ = env.reset()
+        total_steps = args.max_steps or 100
         try:
-            for i in range(args.max_steps or 100):
+            for i in range(total_steps):
                 with torch.inference_mode():
                     actions = policy(obs)
                 if dds_injector is not None:
@@ -392,6 +392,7 @@ def run_sim(args: SimArgs) -> None:
         finally:
             if dds_injector is not None:
                 dds_injector.stop()
+        print(f"[SIM] 仿真结束, 总步数: {min(i + 1, total_steps) if 'i' in dir() else 0}")
         return
 
     from unitree_viser.sim.sim_viewer import SimViewer
@@ -429,9 +430,6 @@ def main() -> None:
         run_train(cli)
     elif isinstance(cli, SimArgs):
         run_sim(cli)
-    else:
-        print(f"Unknown command: {cli}")
-        sys.exit(1)
 
 
 if __name__ == "__main__":

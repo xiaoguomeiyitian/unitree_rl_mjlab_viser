@@ -62,6 +62,7 @@ except ImportError:
 
 
 _factory_initialized = False
+_factory_lock = threading.Lock()
 
 
 class DdsCommandInjector:
@@ -110,17 +111,20 @@ class DdsCommandInjector:
         """执行一次订阅, 返回是否成功."""
         global _factory_initialized
         if not _factory_initialized:
-            try:
-                ChannelFactoryInitialize(self._dds_domain, self._dds_interface)
-                _factory_initialized = True
-                print(
-                    f"[DDS-INJECT] DDS factory 初始化完成 "
-                    f"(domain={self._dds_domain}, interface={self._dds_interface})"
-                )
-                _time.sleep(0.3)
-            except Exception as e:
-                print(f"[DDS-INJECT] ❌ DDS factory 初始化失败: {e}")
-                return False
+            with _factory_lock:
+                # Double-check after acquiring lock
+                if not _factory_initialized:
+                    try:
+                        ChannelFactoryInitialize(self._dds_domain, self._dds_interface)
+                        _factory_initialized = True
+                        print(
+                            f"[DDS-INJECT] DDS factory 初始化完成 "
+                            f"(domain={self._dds_domain}, interface={self._dds_interface})"
+                        )
+                        _time.sleep(0.3)
+                    except Exception as e:
+                        print(f"[DDS-INJECT] ❌ DDS factory 初始化失败: {e}")
+                        return False
 
         try:
             self._subscriber = ChannelSubscriber(self._topic, WirelessController_)
@@ -172,7 +176,10 @@ class DdsCommandInjector:
             print(f"[DDS-INJECT] 消息处理失败: {e}")
 
     def _reconnect_loop(self) -> None:
-        """后台线程: 检测订阅断开并重连 (指数退避)."""
+        """后台线程: 检测订阅断开并重连 (指数退避).
+
+        成功后重置 attempt 计数器, 确保恢复后立即响应.
+        """
         if not _DDS_AVAILABLE:
             return
         attempt = 0
@@ -188,7 +195,9 @@ class DdsCommandInjector:
                 backoff = min(self._reconnect_interval * (2 ** (attempt - 1)), 60.0)
                 print(f"[DDS-INJECT] 🔄 尝试重连 ({attempt}): {self._topic} (等待 {backoff:.1f}s)")
                 _time.sleep(backoff)
-                self._do_subscribe()
+                success = self._do_subscribe()
+                if success:
+                    attempt = 0  # 成功后重置退避计数器
 
     def _timeout_monitor(self) -> None:
         """监控 DDS 消息超时, 超时后归零."""

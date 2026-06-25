@@ -115,7 +115,7 @@ class CommandInjector:
 
         if hasattr(self._term, "vel_command_b"):
             v = _torch.tensor(
-                [self._pending["vx"], self._pending["vy"], 0.0],
+                [self._pending["vx"], self._pending["vy"], self._pending["wz"]],
                 device=self._env.device,
                 dtype=self._term.vel_command_b.dtype,
             )
