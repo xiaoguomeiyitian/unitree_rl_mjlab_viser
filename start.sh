@@ -770,8 +770,8 @@ config_train() {
 
     # ── 5. 训练超参 (直接输入) ──
     echo ""; log_banner "── 训练超参配置 ──"; echo ""
-    MAX_ITERATIONS=$(prompt_input "最大迭代次数" "10000")
     NUM_ENVS=$(prompt_input "并行环境数" "1024")
+    MAX_ITERATIONS=$(prompt_input "最大迭代次数" "10000")
     log_info "环境数: $NUM_ENVS, 迭代: $MAX_ITERATIONS"
 
     # ── 6. Viser 选项 (默认启用, 只问端口号) ──
