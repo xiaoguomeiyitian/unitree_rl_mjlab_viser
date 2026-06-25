@@ -35,7 +35,6 @@ class ViserRunner:
 
     viser_gui_state: dict | None = None
     training_controller: "TrainingController | None" = None
-    render_thread: Any = None  # ViserRenderThread 实例, 用于训练同步
     _post_iter_hooks: list[PostIterHook] = []
 
     def register_post_iter_hook(self, hook: PostIterHook) -> None:
@@ -80,15 +79,7 @@ class ViserRunner:
         """触发所有注册的 post_iter hooks — 只写共享缓冲区, 不调 viser.
 
         渲染线程负责消费 TrainingState 并更新 viser GUI.
-        如果启用了训练同步 (render_thread.sync_training), 等待渲染线程 tick.
         """
-        # 训练同步: 等待渲染线程完成一帧 (浏览器连接后生效)
-        # 无浏览器连接时, 渲染线程不渲染, 主线程全速运行
-        if self.render_thread is not None and self.render_thread.is_rendering:
-            self.render_thread.wait_for_tick(timeout=1.0)
-            # 清除 tick_event, 等待下一帧
-            self.render_thread._tick_event.clear()
-
         # 更新共享状态 (渲染线程负责更新 viser GUI)
         self._update_training_state(iteration, loss_dict)
 

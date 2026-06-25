@@ -694,20 +694,22 @@ scan_train_models() {
     SCAN_MODELS=(); SCAN_MODEL_PATHS=()
     local log_base="logs/viser"
     [ -d "$log_base" ] || return 0
-    while IFS= read -r run_dir; do
-        local best_model="" best_iter=-1
-        while IFS= read -r f; do
-            local fname; fname=$(basename "$f")
-            if [[ "$fname" =~ ^model_([0-9]+) ]]; then
-                local iter="${BASH_REMATCH[1]}"
-                if [ "$iter" -gt "$best_iter" ]; then best_iter="$iter"; best_model="$f"; fi
+    # 递归搜索所有 model_*.pt, 按 run_dir (父目录) 分组找最佳模型
+    local best_model="" best_iter=-1 best_run_dir=""
+    while IFS= read -r f; do
+        local fname; fname=$(basename "$f")
+        if [[ "$fname" =~ ^model_([0-9]+) ]]; then
+            local iter="${BASH_REMATCH[1]}"
+            local run_dir; run_dir=$(dirname "$f")
+            if [ "$iter" -gt "$best_iter" ]; then
+                best_iter="$iter"; best_model="$f"; best_run_dir="$run_dir"
             fi
-        done < <(find "$run_dir" -maxdepth 1 -name "model_*.pt" 2>/dev/null || true)
-        if [ -n "$best_model" ]; then
-            SCAN_MODELS+=("$(basename "$run_dir") — $(basename "$best_model") (iter $best_iter)")
-            SCAN_MODEL_PATHS+=("$best_model")
         fi
-    done < <(find "$log_base" -maxdepth 1 -mindepth 1 -type d 2>/dev/null | sort -r || true)
+    done < <(find "$log_base" -name "model_*.pt" 2>/dev/null | sort)
+    if [ -n "$best_model" ]; then
+        SCAN_MODELS+=("$(basename "$best_run_dir") — $(basename "$best_model") (iter $best_iter)")
+        SCAN_MODEL_PATHS+=("$best_model")
+    fi
 }
 
 config_train() {
@@ -775,9 +777,7 @@ config_train() {
     # ── 6. Viser 选项 (默认启用, 只问端口号) ──
     echo ""
     VISER_PORT=$(prompt_input "Viser 端口" "20006")
-    if [ "$(prompt_yn "启用训练控制 (暂停/单步/速度)?" "y")" = "true" ]; then
-        ENABLE_CONTROL="true"
-    fi
+    ENABLE_CONTROL="true"
 
     # ── 7. wandb 选项 ──
     echo ""

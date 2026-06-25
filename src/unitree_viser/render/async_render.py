@@ -83,7 +83,7 @@ class ViserRenderThread:
         mj_model: Any,
         mj_data: Any,
         sim: Any,
-        target_fps: float = 30.0,
+        target_fps: float = 15.0,
     ) -> None:
         self._server = server
         self._scene = scene
@@ -95,7 +95,9 @@ class ViserRenderThread:
 
         # 双缓冲: 创建独立的 mj_data_b 用于渲染线程 (单环境大小)
         # mj_data_a (=mj_data=sim.mj_data) 为多环境共享, 训练线程写
-        # mj_data_b 为单环境, 渲染线程读, 通过 mjwarp.get_data_into(world_id=env_idx) 填充
+        # mj_data_b 为单环境, 渲染线程读
+        # 使用 mj_forward (CPU) 替代 mjwarp.get_data_into (GPU→CPU 全量传输)
+        # env.step() 已自动同步 qpos 到 mj_data, 只需 mj_forward 计算派生量
         import mujoco
         self._mj_data_b = mujoco.MjData(mj_model)
 
@@ -111,10 +113,7 @@ class ViserRenderThread:
         self._training_state: Any = None  # TrainingState | None
         self._gui_state: dict | None = None  # 用于 GUI 更新
 
-        # 训练同步: 每渲染一帧置位一次, 主线程等待此事件来同步训练速度
-        # 无浏览器连接时不等待 (全速训练)
-        self._tick_event = threading.Event()
-        self._sync_training: bool = False  # 是否启用训练同步
+
 
     # ── 公共 API ───────────────────────────────────────────────────────────
 
@@ -213,8 +212,13 @@ class ViserRenderThread:
     # ── 渲染循环 ───────────────────────────────────────────────────────────
 
     def _render_loop(self) -> None:
-        """渲染线程主循环 — 从 MuJoCo 取数据 + 更新 viser scene + 更新 GUI."""
-        import mujoco_warp as mjwarp
+        """渲染线程主循环 — 从 MuJoCo 取数据 + 更新 viser scene + 更新 GUI.
+
+        轻量同步: 直接读取 mj_data.qpos (env.step() 已同步),
+        然后 mj_forward() 计算派生量 (xpos, xquat 等).
+        避免 mjwarp.get_data_into() 的全量 GPU→CPU 传输.
+        """
+        import mujoco as mj
 
         from unitree_viser.render.viser_setup import (
             push_reward_to_plot,
@@ -245,17 +249,13 @@ class ViserRenderThread:
                 if n_clients != last_client_count:
                     if n_clients > 0:
                         is_connected = True
-                        # 清除 tick_event, 下一帧才通知主线程
-                        self._tick_event.clear()
                         print(
                             f"[RENDER] 浏览器已连接 (客户端数={n_clients}), "
-                            f"渲染 @{connected_fps:.0f}FPS, 训练同步启用"
+                            f"渲染 @{connected_fps:.0f}FPS"
                         )
                     else:
                         is_connected = False
-                        # 浏览器断开, 清除 tick_event 让主线程不阻塞
-                        self._tick_event.clear()
-                        print("[RENDER] 无浏览器连接, 暂停渲染 (训练全速运行)")
+                        print("[RENDER] 无浏览器连接, 暂停渲染")
                     last_client_count = n_clients
 
                 if not is_connected:
@@ -270,22 +270,17 @@ class ViserRenderThread:
                     continue
                 last_render_t = now
 
-                # 渲染: 从 GPU 读取指定环境数据到独立的 mj_data_b (单环境大小)
+                # 渲染: 轻量同步 — 直接读 qpos + mj_forward 计算派生量
+                # env.step() 已自动将 warp 数据同步到 mj_data.qpos
+                # 只需 mj_forward 计算 Viser 需要的派生量 (xpos, xquat 等)
                 with self._data_lock:
-                    mjwarp.get_data_into(
-                        self._mj_data_b,
-                        self._mj_model,
-                        self._sim.wp_data,
-                        world_id=self._env_idx,
-                    )
+                    # 拷贝 qpos 到独立的 mj_data_b (避免 mj_forward 与训练线程冲突)
+                    self._mj_data_b.qpos[:] = self._mj_data.qpos
+                    mj.mj_forward(self._mj_model, self._mj_data_b)
                     self._scene.update_from_mjdata(self._mj_data_b)
 
                 self._total_frames += 1
                 self._error_count = 0
-
-                # 训练同步: 通知主线程可以执行一次迭代
-                if self._sync_training:
-                    self._tick_event.set()
 
                 # GUI 更新 (每秒最多 1 次)
                 now = _time.time()
@@ -347,7 +342,7 @@ class ViserRenderThread:
 
 def start_viser_render_thread(
     viser_handle: ViserHandle,
-    target_fps: float = 30.0,
+    target_fps: float = 15.0,
 ) -> None:
     """deprecated: 使用 ViserRenderThread(...).start() 代替.
 

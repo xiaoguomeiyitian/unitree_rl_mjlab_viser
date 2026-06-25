@@ -27,7 +27,7 @@ unitree_rl_mjlab_viser/
 │   ├── cli.py                             # tyro CLI 入口 (train / sim 子命令)
 │   ├── render/
 │   │   ├── __init__.py                    # PEP 562 延迟导入
-│   │   ├── async_render.py                # ★ 后台渲染线程 (从 trainBot 移植, 165 行)
+│   │   ├── async_render.py                # ★ 后台渲染线程 (轻量 mj_forward 同步)
 │   │   ├── viser_setup.py                 # 训练模式 viewer (服务器+场景+GUI)
 │   │   └── term_plots.py                  # Viser 折线图包装 (mjlab + fallback)
 │   ├── train/
@@ -42,7 +42,7 @@ unitree_rl_mjlab_viser/
 │   ├── train_viser.sh                     # 一键启动训练 + 浏览器
 │   └── sim_viser.sh                       # 一键启动仿真
 └── tests/
-    └── test_smoke.py                      # 9 个 smoke test, 容错处理缺失依赖
+    └── test_smoke.py                      # 11 个 smoke test, 容错处理缺失依赖
 ```
 
 ---
@@ -69,7 +69,7 @@ cd unitree_rl_mjlab_viser
 
 # 3. 验证
 ./start.sh version      # 显示版本 + GPU/CPU 模式 + 关键依赖
-./start.sh test         # 跑 smoke test (10 passed)
+./start.sh test         # 跑 smoke test (11 passed)
 ./start.sh list         # 列出所有可用任务
 ```
 
@@ -216,17 +216,17 @@ unitree-viser sim Unitree-G1-Flat --headless --max-steps 100
 │   ├─ PPO update (alg.update)                                │
 │   ├─ logger.log + save (every save_interval)                │
 │   ├─ TrainingController.wait_if_paused()    [暂停/单步]     │
-│   └─ fire _post_iter_hooks                   [Viser 数据]   │
+│   └─ fire _post_iter_hooks                   [更新 GUI 数据] │
 └─────────────────────────────────────────────────────────────┘
                           ▲
                           │ 训练数据
                           │
 ┌─────────────────────────┴───────────────────────────────────┐
-│ Daemon 线程: Viser 后台渲染                                 │
+│ Daemon 线程: Viser 后台渲染 (独立于训练, 不影响训练速度)    │
 │   ├─ 检查 server.get_clients() → 0 个时 sleep (零开销)    │
-│   ├─ 限流 10 FPS                                            │
-│   ├─ mjwarp.get_data_into() (GPU→CPU 同步)                  │
-│   └─ scene.update_from_mjdata() + server.flush()            │
+│   ├─ 限流 15 FPS                                            │
+│   ├─ 读取 mj_data.qpos → mj_forward() (轻量 CPU 计算)       │
+│   └─ scene.update_from_mjdata()                             │
 └─────────────────────────────────────────────────────────────┘
                           ▲
                           │ sim.data (warp 数组)
@@ -263,6 +263,7 @@ unitree-viser sim Unitree-G1-Flat --headless --max-steps 100
 3. **Runner 子类 + 重写 learn()** — 比 trainBot 复制 80+ 行循环更精炼 (~50 行复制 + 2 处 [VISER] 标记)
 4. **不 fork mjlab / rsl_rl** — 1.2.0 钉版, 避免上游冲突
 5. **训练控制用 `threading.Event`** — 跨线程安全, 不阻塞主循环
+6. **渲染线程与训练完全解耦** — 浏览器仅用于观察，不影响训练速度
 6. **延迟导入 (PEP 562)** — render 子包不强制依赖 viser, smoke test 能在干净环境跑
 
 ---
@@ -292,9 +293,9 @@ curl http://localhost:20006
 ```
 
 检查控制台:
-- 训练启动时: `[INFO] Viser 后台渲染线程已启动 (目标 10.0 FPS)`
-- 浏览器连接: `[RENDER] 浏览器已连接 (客户端数=1), 开始渲染 @10.0FPS`
-- 浏览器断开: `[RENDER] 无浏览器连接, 暂停渲染 (训练全速运行)`
+- 训练启动时: `[INFO] ViserRenderThread 已启动 (目标 15.0 FPS)`
+- 浏览器连接: `[RENDER] 浏览器已连接 (客户端数=1), 渲染 @15.0FPS`
+- 浏览器断开: `[RENDER] 无浏览器连接, 暂停渲染`
 
 ### 2. 训练时变慢
 

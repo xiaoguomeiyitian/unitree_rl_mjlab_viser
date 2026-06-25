@@ -241,12 +241,9 @@ def run_train(args: TrainArgs) -> None:
     try:
         if viser_handle is not None:
             start_viser_render_thread(viser_handle, target_fps=args.viser_fps)
-            # 将 render_thread 传给 runner, 启用训练同步
+            # 将 render_thread 传给 runner (仅用于统计，不影响训练速度)
             render_thread = gui_state.get("_render_thread")
-            if render_thread is not None:
-                runner.render_thread = render_thread
-                render_thread.set_sync_training(True)
-                print("[TRAIN] 训练同步已启用: 训练速度与渲染 FPS 同步")
+            print("[TRAIN] Viser 已启动: 浏览器仅用于观察，训练全速运行")
         runner.learn(
             num_learning_iterations=agent_cfg["max_iterations"],
             init_at_random_ep_len=True,
