@@ -365,7 +365,7 @@ def start_viser_render_thread(
     """
     # 检查是否已有 ViserRenderThread 实例
     existing = viser_handle.get("_render_thread_obj")
-    if existing is not None and existing.is_alive():
+    if existing is not None and existing.is_alive:
         return
 
     thread = ViserRenderThread(

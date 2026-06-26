@@ -85,10 +85,10 @@ def test_inject_writes_vel_command_b():
 
     inj.inject()
 
-    # vel_command_b 已被写入 (除 wz 永远是 0, 因 _torch.tensor([vx, vy, 0.0]))
+    # vel_command_b 已被写入: vx=0.5, vy=-0.3, wz=0.1
     assert float(vcb[0, 0]) == pytest.approx(0.5)
     assert float(vcb[0, 1]) == pytest.approx(-0.3)
-    assert float(vcb[0, 2]) == pytest.approx(0.0)
+    assert float(vcb[0, 2]) == pytest.approx(0.1)
 
 
 def test_inject_skipped_when_disabled():

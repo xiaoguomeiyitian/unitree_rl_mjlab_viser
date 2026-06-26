@@ -88,17 +88,10 @@ def test_make_viser_runner_cls_different_bases():
 
 
 def test_post_iter_hooks_initially_empty():
-    """类级 _post_iter_hooks 初始为空列表."""
-    from unitree_viser.train.runner_subclass import ViserRunner
-
-    # 不污染其他测试: 备份
-    saved = list(ViserRunner._post_iter_hooks)
-    ViserRunner._post_iter_hooks = []
-    try:
-        assert isinstance(ViserRunner._post_iter_hooks, list)
-        assert len(ViserRunner._post_iter_hooks) == 0
-    finally:
-        ViserRunner._post_iter_hooks = saved
+    """实例级 _post_iter_hooks 初始为空列表."""
+    runner = _make_runner()
+    assert isinstance(runner._post_iter_hooks, list)
+    assert len(runner._post_iter_hooks) == 0
 
 
 def test_register_post_iter_hook_appends():
@@ -197,8 +190,8 @@ def test_default_hook_skips_when_gui_state_none():
         mock_push.assert_not_called()
 
 
-def test_default_hook_calls_update_with_gui_state():
-    """viser_gui_state 存在时调用 update_training_info 和 push_reward_to_plot."""
+def test_default_hook_is_noop():
+    """_default_post_iter_hook 现在是 no-op (GUI 更新移至渲染线程)."""
     from unitree_viser.train.runner_subclass import ViserRunner
 
     inst = ViserRunner.__new__(ViserRunner)
@@ -210,28 +203,30 @@ def test_default_hook_calls_update_with_gui_state():
         "unitree_viser.render.viser_setup.push_reward_to_plot"
     ) as mock_push:
         inst._default_post_iter_hook(5, 1.23, 100.0)
-        mock_update.assert_called_once()
-        mock_push.assert_called_once()
-        # 验证参数
-        call_kwargs = mock_update.call_args.kwargs
-        assert call_kwargs["iteration"] == 5
-        assert call_kwargs["mean_reward"] == 1.23
+        # no-op: 不应调用任何 GUI 更新
+        mock_update.assert_not_called()
+        mock_push.assert_not_called()
 
 
-def test_default_hook_episode_length_none():
-    """episode_length 为 None 时 push_reward 不传 episode_length."""
+def test_trigger_post_iter_hooks_calls_update_training_state():
+    """_trigger_post_iter_hooks 更新 TrainingState."""
     from unitree_viser.train.runner_subclass import ViserRunner
+    from unitree_viser.render.shared_state import TrainingState
 
     inst = ViserRunner.__new__(ViserRunner)
-    inst.viser_gui_state = {"info_html": MagicMock(), "reward_plotter": MagicMock()}
+    inst._post_iter_hooks = []  # 模拟 __init__ 中的初始化
+    gui_state = {"_training_state": TrainingState()}
+    inst.viser_gui_state = gui_state
 
-    with patch(
-        "unitree_viser.render.viser_setup.push_reward_to_plot"
-    ) as mock_push:
-        inst._default_post_iter_hook(0, 0.5, None)
-        mock_push.assert_called_once()
-        call_kwargs = mock_push.call_args.kwargs
-        assert call_kwargs["episode_length"] is None
+    inst._trigger_post_iter_hooks(5, {"reward": 1.5, "episode_length": 200.0})
+
+    # TrainingState 应被更新
+    ts = gui_state["_training_state"]
+    result = ts.consume()
+    assert result is not None
+    assert result["iteration"] == 5
+    assert result["mean_reward"] == 1.5
+    assert result["episode_length"] == 200.0
 
 
 # ── viser_handle TypedDict ────────────────────────────────────────────────

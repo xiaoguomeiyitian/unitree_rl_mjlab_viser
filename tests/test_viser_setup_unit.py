@@ -10,9 +10,16 @@ from __future__ import annotations
 
 import os
 import sys
+import types
 from unittest.mock import MagicMock, patch
 
 import pytest
+
+# Stub mediapy to avoid Python 3.12 + numpy 2.x incompatibility
+_stub = types.ModuleType("mediapy")
+_stub.__file__ = "(test-stub)"
+_stub.set_ffmpeg = lambda _path: None
+sys.modules["mediapy"] = _stub
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _SRC = os.path.normpath(os.path.join(_HERE, "..", "src"))
@@ -43,7 +50,7 @@ def test_update_training_info_writes_html():
 
 
 def test_update_training_info_handles_none_values():
-    """mean_reward / current_fps 为 None 时不显示数值."""
+    """mean_reward / current_fps 为 None 时不显示该字段."""
     from unitree_viser.render.viser_setup import update_training_info
 
     info_html = MagicMock()
@@ -57,7 +64,9 @@ def test_update_training_info_handles_none_values():
     )
     content = info_html.content
     assert "10" in content
-    assert "--" in content  # 占位符
+    # None 值被跳过，不显示任何数值
+    assert "Mean Reward" not in content
+    assert "Render FPS" not in content
 
 
 def test_update_training_info_no_html_safe():
@@ -153,7 +162,7 @@ def test_setup_viser_for_training_returns_4tuple():
 
     with patch("viser.ViserServer", return_value=server), patch(
         "unitree_viser.render.viser_setup._create_scene", return_value=scene
-    ):
+    ), patch("mujoco.MjData", return_value=MagicMock()):
         result = setup_viser_for_training(env=env, port=20006, env_idx=0)
 
     assert len(result) == 4
@@ -185,7 +194,7 @@ def test_setup_viser_for_training_with_control():
 
     with patch("viser.ViserServer", return_value=server), patch(
         "unitree_viser.render.viser_setup._create_scene", return_value=scene
-    ):
+    ), patch("mujoco.MjData", return_value=MagicMock()):
         _, _, _, gui_state = setup_viser_for_training(
             env=env, enable_control=True, fps=10.0
         )
@@ -212,7 +221,7 @@ def test_setup_viser_for_training_no_control():
 
     with patch("viser.ViserServer", return_value=server), patch(
         "unitree_viser.render.viser_setup._create_scene", return_value=scene
-    ):
+    ), patch("mujoco.MjData", return_value=MagicMock()):
         _, _, _, gui_state = setup_viser_for_training(env=env, enable_control=False)
 
     assert gui_state["controller"] is None

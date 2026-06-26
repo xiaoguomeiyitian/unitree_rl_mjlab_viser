@@ -73,9 +73,12 @@ def test_update_delegates_to_mjlab_impl():
 
         plotter = ViserTermPlotter(server, ["X"])
         plotter.update(iteration=5, values={"X": 1.5})
-        plotter._impl.update.assert_called_once_with(
-            iteration=5, values={"X": 1.5}
-        )
+        # mjlab 模式将 dict 转为 list of (name, np.array) 再传给底层
+        plotter._impl.update.assert_called_once()
+        call_args = plotter._impl.update.call_args[0]
+        # call_args[0] = [('X', array([1.5]))]
+        assert len(call_args) == 1
+        assert call_args[0][0][0] == "X"  # 第一个元素的 name
 
 
 def test_fallback_update_appends_and_assigns_data():
