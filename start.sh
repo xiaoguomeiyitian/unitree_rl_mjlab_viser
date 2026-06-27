@@ -321,16 +321,16 @@ EOF
 }
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 命令构建
+# 命令构建 (使用 bash 数组安全处理含空格的参数)
 # ══════════════════════════════════════════════════════════════════════════════
-_opt()  { [ "${2:-}" != "" ] && CMD_ARGS="$CMD_ARGS --$1 $2" || true; }
-_flag() { [ "${2:-}" = "true" ] && CMD_ARGS="$CMD_ARGS --$1" || true; }
+_opt()  { [ "${2:-}" != "" ] && CMD_ARGS+=(--"$1" "$2") || true; }
+_flag() { [ "${2:-}" = "true" ] && CMD_ARGS+=(--"$1") || true; }
 
 build_cmd() {
-    CMD_ARGS=""
+    CMD_ARGS=()
     case "$MODE" in
         train)
-            CMD_ARGS="--task $TASK"
+            CMD_ARGS+=(--task "$TASK")
             [ "$VISER_PORT" != "0" ] && { _opt viser-port "$VISER_PORT"; _opt viser-fps "$VISER_FPS"; _opt viser-env-idx "$VISER_ENV_IDX"; _flag enable-control "$ENABLE_CONTROL"; }
             _flag headless "$HEADLESS"
             _opt num-envs "$NUM_ENVS"
@@ -345,7 +345,7 @@ build_cmd() {
             _flag use-wandb "$USE_WANDB"
             ;;
         sim)
-            CMD_ARGS="--task $TASK"
+            CMD_ARGS+=(--task "$TASK")
             _opt viser-port "$VISER_PORT"
             _opt viser-env-idx "$VISER_ENV_IDX"
             _flag headless "$HEADLESS"
@@ -354,7 +354,7 @@ build_cmd() {
             _opt policy "$POLICY"
             _opt device "$SIM_DEVICE"
             # tyro 的 inject_commands: bool=True, 配套 --no-inject-commands
-            [ "${INJECT_COMMANDS:-true}" = "false" ] && CMD_ARGS="$CMD_ARGS --no-inject-commands"
+            [ "${INJECT_COMMANDS:-true}" = "false" ] && CMD_ARGS+=(--no-inject-commands)
             _opt command-name "$COMMAND_NAME"
             # DDS 命令注入源 (unitree_remote_ctrl 集成)
             _opt command-source "$COMMAND_SOURCE"
@@ -364,9 +364,9 @@ build_cmd() {
             _opt dds-timeout "$DDS_TIMEOUT"
             _opt max-steps "$MAX_STEPS"
             ;;
-        list)   CMD_ARGS="" ;;
-        test)   CMD_ARGS="" ;;
-        doctor) CMD_ARGS="" ;;
+        list)   CMD_ARGS=() ;;
+        test)   CMD_ARGS=() ;;
+        doctor) CMD_ARGS=() ;;
     esac
 }
 
@@ -389,10 +389,10 @@ run_cmd() {
 
     case "$MODE" in
         train)
-            exec "$PYTHON_BIN" -m unitree_viser.cli train-args $CMD_ARGS
+            exec "$PYTHON_BIN" -m unitree_viser.cli train-args "${CMD_ARGS[@]}"
             ;;
         sim)
-            exec "$PYTHON_BIN" -m unitree_viser.cli sim-args $CMD_ARGS
+            exec "$PYTHON_BIN" -m unitree_viser.cli sim-args "${CMD_ARGS[@]}"
             ;;
         list)
             # 使用统一的 scan_tasks (注册表 → 离线扫描 → 硬编码)
@@ -426,7 +426,7 @@ run_cmd() {
             fi
             ;;
         test)
-            exec "$PYTHON_BIN" tests/test_smoke.py
+            exec "$PYTHON_BIN" tests/test_smoke_integration.py
             ;;
         doctor)
             echo ""

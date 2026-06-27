@@ -242,8 +242,9 @@ class ViserRunner:
             self._default_post_iter_hook(it, last_mean_reward, last_episode_length)
 
         if self.logger.writer is not None:
+            final_it = self.current_learning_iteration
             self.save(
-                os.path.join(self.logger.log_dir, f"model_{self.current_learning_iteration}.pt")
+                os.path.join(self.logger.log_dir, f"model_{final_it}.pt")
             )
             self.logger.stop_logging_writer()
 

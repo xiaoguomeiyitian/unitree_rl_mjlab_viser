@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import sys
 from dataclasses import dataclass
@@ -17,6 +18,8 @@ from pathlib import Path
 from typing import Literal, Union
 
 import tyro
+
+logger = logging.getLogger("unitree_viser.cli")
 
 
 # ── sys.path 修复 ────────────────────────────────────────────────────────
@@ -157,6 +160,12 @@ def run_train(args: TrainArgs) -> None:
     )
     from unitree_viser.train.runner_subclass import make_viser_runner_cls
 
+    # 0. 参数验证
+    if not (0 <= args.viser_port <= 65535):
+        raise ValueError(f"viser_port 必须在 0-65535 范围内, 收到 {args.viser_port}")
+    if args.viser_fps <= 0:
+        raise ValueError(f"viser_fps 必须为正数, 收到 {args.viser_fps}")
+
     # 1. 加载配置
     env_cfg = load_env_cfg(args.task)
     agent_cfg = load_rl_cfg(args.task)
@@ -186,14 +195,14 @@ def run_train(args: TrainArgs) -> None:
     # 默认禁用 wandb (使用 tensorboard), 除非用户显式开启
     if not args.use_wandb and agent_cfg.get("logger", "tensorboard") == "wandb":
         agent_cfg["logger"] = "tensorboard"
-        print("[TRAIN] wandb 已默认禁用, 使用 tensorboard 日志 (--use-wandb 可开启)")
+        logger.info("wandb 已默认禁用, 使用 tensorboard 日志 (--use-wandb 可开启)")
 
     import torch
     if args.device == "auto":
         device = "cuda:0" if torch.cuda.is_available() else "cpu"
     else:
         device = args.device
-    print(f"[TRAIN] 使用设备: {device}")
+    logger.info("使用设备: %s", device)
 
     env = ManagerBasedRlEnv(cfg=env_cfg, device=device)
     env = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.get("clip_actions", 1.0))
@@ -214,9 +223,9 @@ def run_train(args: TrainArgs) -> None:
     # 恢复训练: 加载 checkpoint
     if args.resume and args.checkpoint:
         import torch as _torch
-        print(f"[TRAIN] 从 checkpoint 恢复: {args.checkpoint}")
+        logger.info("从 checkpoint 恢复: %s", args.checkpoint)
         runner.load(_torch.load(args.checkpoint, map_location=device, weights_only=False))
-        print(f"[TRAIN] 恢复完成, 从 iteration {runner.current_learning_iteration} 继续")
+        logger.info("恢复完成, 从 iteration %d 继续", runner.current_learning_iteration)
 
     viser_handle = None
     if not args.headless and args.viser_port > 0:
@@ -233,9 +242,11 @@ def run_train(args: TrainArgs) -> None:
                 from unitree_viser.train.training_controller import TrainingController
                 assert isinstance(gui_state["controller"], TrainingController)
                 runner.training_controller = gui_state["controller"]
-            print(f"\n[VISER] 浏览器访问: http://localhost:{args.viser_port}\n")
+            logger.info("浏览器访问: http://localhost:%d", args.viser_port)
+        except (KeyboardInterrupt, SystemExit):
+            raise
         except Exception as e:
-            print(f"[VISER] 启动失败, 继续训练但无可视化: {e}")
+            logger.warning("Viser 启动失败, 继续训练但无可视化: %s", e)
             viser_handle = None
 
     try:
@@ -243,7 +254,7 @@ def run_train(args: TrainArgs) -> None:
             start_viser_render_thread(viser_handle, target_fps=args.viser_fps)
             # 将 render_thread 传给 runner (仅用于统计，不影响训练速度)
             render_thread = gui_state.get("_render_thread")
-            print("[TRAIN] Viser 已启动: 浏览器仅用于观察，训练全速运行")
+            logger.info("Viser 已启动: 浏览器仅用于观察, 训练全速运行")
         runner.learn(
             num_learning_iterations=agent_cfg["max_iterations"],
             init_at_random_ep_len=True,
@@ -251,7 +262,7 @@ def run_train(args: TrainArgs) -> None:
     finally:
         if viser_handle is not None:
             stop_viser_render_thread(viser_handle)
-        print(f"\n[TRAIN] 完成. 日志目录: {log_dir}")
+        logger.info("训练完成. 日志目录: %s", log_dir)
 
 
 @dataclass
@@ -307,6 +318,14 @@ def run_sim(args: SimArgs) -> None:
     from mjlab.tasks.registry import load_env_cfg
     from mjlab.envs import ManagerBasedRlEnv
 
+    # 参数验证
+    if not (0 <= args.viser_port <= 65535):
+        raise ValueError(f"viser_port 必须在 0-65535 范围内, 收到 {args.viser_port}")
+    if args.num_envs < 1:
+        raise ValueError(f"num_envs 必须 >= 1, 收到 {args.num_envs}")
+    if args.max_steps is not None and args.max_steps < 0:
+        raise ValueError(f"max_steps 必须 >= 0, 收到 {args.max_steps}")
+
     env_cfg = load_env_cfg(args.task, play=True)
     env_cfg.scene.num_envs = args.num_envs
 
@@ -315,7 +334,7 @@ def run_sim(args: SimArgs) -> None:
         device = "cuda:0" if torch.cuda.is_available() else "cpu"
     else:
         device = args.device
-    print(f"[SIM] 使用设备: {device}")
+    logger.info("使用设备: %s", device)
     env = ManagerBasedRlEnv(cfg=env_cfg, device=device)
 
     policy = None
@@ -333,7 +352,7 @@ def run_sim(args: SimArgs) -> None:
         runner = ViserRunnerCls(env_wrapped, agent_cfg, None, device)
         runner.load(args.checkpoint)
         policy = runner.get_inference_policy(device=device)
-        print(f"[SIM] 加载策略: {args.checkpoint}")
+        logger.info("加载策略: %s", args.checkpoint)
     else:
         from unitree_viser.sim.sim_viewer import (
             _zero_policy, _random_policy, _make_typed_policy,
@@ -344,10 +363,10 @@ def run_sim(args: SimArgs) -> None:
         except Exception:
             num_actions = 12
         policy = _make_typed_policy(base, num_actions)
-        print(f"[SIM] 使用 {args.policy or 'zero'} policy ({num_actions} DOF)")
+        logger.info("使用 %s policy (%d DOF)", args.policy or "zero", num_actions)
 
     if args.headless:
-        print("[SIM] Headless 模式: 不启动 Viser")
+        logger.info("Headless 模式: 不启动 Viser")
         dds_injector = None
         if args.command_source in ("dds", "both"):
             try:
@@ -364,9 +383,9 @@ def run_sim(args: SimArgs) -> None:
                     timeout_s=args.dds_timeout,
                 )
                 dds_injector.start()
-                print(
-                    f"[SIM-DDS] 已订阅: {dds_injector._topic} "
-                    f"(domain={args.dds_domain}, interface={args.dds_interface})"
+                logger.info(
+                    "DDS 已订阅: %s (domain=%d, interface=%s)",
+                    dds_injector._topic, args.dds_domain, args.dds_interface,
                 )
             except Exception as e:
                 print(f"[SIM] 跳过 DDS 命令注入: {e}")
@@ -392,7 +411,7 @@ def run_sim(args: SimArgs) -> None:
         finally:
             if dds_injector is not None:
                 dds_injector.stop()
-        print(f"[SIM] 仿真结束, 总步数: {min(i + 1, total_steps) if 'i' in dir() else 0}")
+        logger.info("仿真结束")
         return
 
     from unitree_viser.sim.sim_viewer import SimViewer

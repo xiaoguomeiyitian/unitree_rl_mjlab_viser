@@ -20,6 +20,11 @@ import viser
 from unitree_viser.sim.command_injection import CommandInjector
 
 
+# ── Module-level constants ─────────────────────────────────────────────────
+_DEFAULT_TARGET_FPS = 30.0
+_STATUS_UPDATE_INTERVAL = 10  # steps
+
+
 class PolicyLike(Protocol):
     """策略协议 - 接受 obs tensor 或 dict, 返回 actions tensor."""
 
@@ -56,7 +61,7 @@ def _random_policy(obs: Any, num_actions: int = 12) -> torch.Tensor:
     return torch.rand(actor_obs.shape[0], num_actions, device=actor_obs.device) * 2 - 1
 
 
-def _make_typed_policy(base_policy, num_actions: int):
+def _make_typed_policy(base_policy: PolicyLike, num_actions: int) -> PolicyLike:
     """包装 base_policy, 强制输出形状为 (n, num_actions)."""
     def typed_policy(obs: Any) -> torch.Tensor:
         actor_obs = _extract_actor_obs(obs)
@@ -227,7 +232,7 @@ class SimViewer:
 
         obs, _ = self._env.reset()
         sim = self._env.sim
-        target_fps = 30.0
+        target_fps = _DEFAULT_TARGET_FPS
         last_render_t = 0.0
 
         # 创建独立的 mj_data 用于渲染, 避免与训练/仿真线程冲突
@@ -257,11 +262,13 @@ class SimViewer:
                         mj_data_render.qpos[:] = sim.mj_data.qpos
                         mj.mj_forward(sim.mj_model, mj_data_render)
                         self._scene.update_from_mjdata(mj_data_render)
+                    except (KeyboardInterrupt, SystemExit):
+                        raise
                     except Exception as e:
                         print(f"[SIM] 渲染失败: {e}")
                     last_render_t = now
 
-                if self._step_count % 10 == 0:
+                if self._step_count % _STATUS_UPDATE_INTERVAL == 0:
                     self._update_status_html(reward, terminated, truncated)
 
         except KeyboardInterrupt:
@@ -291,6 +298,8 @@ class SimViewer:
         if self._server is not None:
             try:
                 self._server.stop()
+            except (KeyboardInterrupt, SystemExit):
+                raise
             except Exception:
                 pass
             self._server = None

@@ -10,12 +10,24 @@
 
 from __future__ import annotations
 
+import logging
 import threading
 import time as _time
 from typing import Any, TypedDict
 
 if False:  # TYPE_CHECKING 替代
     from unitree_viser.render.shared_state import TrainingState
+
+logger = logging.getLogger("unitree_viser.render")
+
+
+# ── Module-level constants ─────────────────────────────────────────────────
+_MAX_CONSECUTIVE_ERRORS = 10
+_GUI_UPDATE_INTERVAL = 1.0  # seconds
+_CONNECTED_FPS_CAP = 30.0
+_NO_CLIENT_SLEEP = 0.5  # seconds
+_ERROR_BACKOFF_BASE = 0.5  # seconds
+_ERROR_BACKOFF_MAX = 5.0  # seconds
 
 
 # ── ViserHandle (向后兼容) ──────────────────────────────────────────────────
@@ -131,7 +143,7 @@ class ViserRenderThread:
             target=self._render_loop, name="viser-render", daemon=True
         )
         self._thread.start()
-        print(f"[INFO] ViserRenderThread 已启动 (目标 {self._target_fps:.1f} FPS)")
+        logger.info("ViserRenderThread 已启动 (目标 %.1f FPS)", self._target_fps)
 
     def stop(self, timeout: float = 2.0) -> None:
         """停止渲染线程 (幂等)."""
@@ -142,9 +154,9 @@ class ViserRenderThread:
         if self._thread.is_alive():
             self._thread.join(timeout=timeout)
         self._thread = None
-        print(
-            f"[INFO] ViserRenderThread 已停止 "
-            f"(渲染 {self._total_frames} 帧, {self._error_count} 次异常)"
+        logger.info(
+            "ViserRenderThread 已停止 (渲染 %d 帧, %d 次异常)",
+            self._total_frames, self._error_count,
         )
 
     @property
@@ -236,14 +248,10 @@ class ViserRenderThread:
 
         # GUI 更新频率控制
         last_gui_update_t: float = 0.0
-        GUI_UPDATE_INTERVAL = 1.0  # 每秒更新一次 GUI
 
-        # 有浏览器连接时降低 FPS 到 30, 减少 CPU 争抢; 无连接时几乎零开销
-        connected_fps = min(self._target_fps, 30.0)
+        # 有浏览器连接时降低 FPS, 减少 CPU 争抢; 无连接时几乎零开销
+        connected_fps = min(self._target_fps, _CONNECTED_FPS_CAP)
         connected_interval = 1.0 / connected_fps
-
-        # 持久错误退出阈值
-        _MAX_CONSECUTIVE_ERRORS = 10
 
         while not self._stop_event.is_set():
             try:
@@ -257,17 +265,17 @@ class ViserRenderThread:
                 if n_clients != last_client_count:
                     if n_clients > 0:
                         is_connected = True
-                        print(
-                            f"[RENDER] 浏览器已连接 (客户端数={n_clients}), "
-                            f"渲染 @{connected_fps:.0f}FPS"
+                        logger.info(
+                            "浏览器已连接 (客户端数=%d), 渲染 @%.0fFPS",
+                            n_clients, connected_fps,
                         )
                     else:
                         is_connected = False
-                        print("[RENDER] 无浏览器连接, 暂停渲染")
+                        logger.info("无浏览器连接, 暂停渲染")
                     last_client_count = n_clients
 
                 if not is_connected:
-                    _time.sleep(0.5)
+                    _time.sleep(_NO_CLIENT_SLEEP)
                     continue
 
                 # 帧率控制
@@ -292,7 +300,7 @@ class ViserRenderThread:
 
                 # GUI 更新 (每秒最多 1 次)
                 now = _time.time()
-                if now - last_gui_update_t >= GUI_UPDATE_INTERVAL:
+                if now - last_gui_update_t >= _GUI_UPDATE_INTERVAL:
                     last_gui_update_t = now
                     state = self._consume_training_state()
                     if state is not None and self._gui_state is not None:
@@ -302,18 +310,18 @@ class ViserRenderThread:
                 self._error_count += 1
                 if self._error_count <= 3:
                     import traceback
-                    print(f"[RENDER] 渲染异常 ({self._error_count}/3): {e}")
+                    logger.warning("渲染异常 (%d/3): %s", self._error_count, e)
                     traceback.print_exc()
                 elif self._error_count == 4:
-                    print("[RENDER] 渲染异常已达 3 次, 静默忽略后续错误...")
+                    logger.warning("渲染异常已达 3 次, 静默忽略后续错误...")
                 elif self._error_count >= _MAX_CONSECUTIVE_ERRORS:
-                    print(
-                        f"[RENDER] 连续异常已达 {_MAX_CONSECUTIVE_ERRORS} 次, "
-                        f"渲染线程退出. 最后错误: {e}"
+                    logger.error(
+                        "连续异常已达 %d 次, 渲染线程退出. 最后错误: %s",
+                        _MAX_CONSECUTIVE_ERRORS, e,
                     )
                     self._stop_event.set()
                     break
-                _time.sleep(min(0.5 * self._error_count, 5.0))
+                _time.sleep(min(_ERROR_BACKOFF_BASE * self._error_count, _ERROR_BACKOFF_MAX))
 
     def _consume_training_state(self) -> dict | None:
         """消费训练状态, 返回 None 表示无新状态."""
@@ -348,8 +356,10 @@ class ViserRenderThread:
                 mean_reward=state.get("mean_reward", 0.0),
                 episode_length=state.get("episode_length"),
             )
+        except (KeyboardInterrupt, SystemExit):
+            raise
         except Exception as e:
-            print(f"[RENDER] GUI 更新失败: {e}")
+            logger.warning("GUI 更新失败: %s", e)
 
 
 # ── 向后兼容: 函数式 API (deprecated) ──────────────────────────────────────
@@ -398,7 +408,7 @@ def stop_viser_render_thread(
             t.join(timeout=timeout)
         total = viser_handle.get("_render_total_frames", 0)
         errors = viser_handle.get("_render_error_count", 0)
-        print(f"[INFO] Viser 后台渲染线程已停止 (渲染 {total} 帧, {errors} 次异常)")
+        logger.info("Viser 后台渲染线程已停止 (渲染 %d 帧, %d 次异常)", total, errors)
 
 
 def is_render_thread_alive(viser_handle: ViserHandle) -> bool:

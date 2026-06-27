@@ -13,6 +13,7 @@ Joystick → velocity:
 
 from __future__ import annotations
 
+import logging
 import threading
 import time as _time
 from typing import TYPE_CHECKING, Any
@@ -20,6 +21,15 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     import viser  # noqa: F401
     from mjlab.envs import ManagerBasedRlEnv
+
+logger = logging.getLogger("unitree_viser.sim.dds")
+
+
+# ── Module-level constants ─────────────────────────────────────────────────
+_RECONNECT_INTERVAL = 5.0  # seconds
+_RECONNECT_BACKOFF_MAX = 60.0  # seconds
+_TIMEOUT_CHECK_INTERVAL_MIN = 0.1  # seconds
+_FACTORY_INIT_DELAY = 0.3  # seconds
 
 
 # ── unitree_sdk2py 可用性检测 ──────────────────────────────────────────────
@@ -104,8 +114,10 @@ class DdsCommandInjector:
         self._topic: str = f"rt/{robot_key}/wirelesscontroller"
         self._started: bool = False
         self._running: bool = True
-        self._reconnect_interval: float = 5.0
+        self._reconnect_interval: float = _RECONNECT_INTERVAL
         self._max_reconnect_attempts: int = 0  # 0 = 无限重连
+        self._timeout_thread: threading.Thread | None = None
+        self._reconnect_thread: threading.Thread | None = None
 
     def _do_subscribe(self) -> bool:
         """执行一次订阅, 返回是否成功."""
@@ -117,26 +129,23 @@ class DdsCommandInjector:
                     try:
                         ChannelFactoryInitialize(self._dds_domain, self._dds_interface)
                         _factory_initialized = True
-                        print(
-                            f"[DDS-INJECT] DDS factory 初始化完成 "
-                            f"(domain={self._dds_domain}, interface={self._dds_interface})"
+                        logger.info(
+                            "DDS factory 初始化完成 (domain=%d, interface=%s)",
+                            self._dds_domain, self._dds_interface,
                         )
-                        _time.sleep(0.3)
+                        _time.sleep(_FACTORY_INIT_DELAY)
                     except Exception as e:
-                        print(f"[DDS-INJECT] ❌ DDS factory 初始化失败: {e}")
+                        logger.error("DDS factory 初始化失败: %s", e)
                         return False
 
         try:
             self._subscriber = ChannelSubscriber(self._topic, WirelessController_)
             self._subscriber.Init(self._on_message, 1)
-            print(
-                f"[DDS-INJECT] ✅ 已订阅: {self._topic} "
-                f"(超时={self._timeout_s}s 归零)"
-            )
+            logger.info("已订阅: %s (超时=%.1fs 归零)", self._topic, self._timeout_s)
             self._last_msg_time = _time.time()
             return True
         except Exception as e:
-            print(f"[DDS-INJECT] ❌ 订阅失败: {e}")
+            logger.error("订阅失败: %s", e)
             self._subscriber = None
             return False
 
@@ -147,21 +156,18 @@ class DdsCommandInjector:
         self._started = True
 
         if not _DDS_AVAILABLE:
-            print(
-                f"[DDS-INJECT] ⚠️ unitree_sdk2py 不可用, 退化为 mock "
-                f"(topic={self._topic}, 速度恒为 0)"
-            )
+            logger.warning("unitree_sdk2py 不可用, 退化为 mock (topic=%s)", self._topic)
             return
 
         self._do_subscribe()
 
         if self._timeout_s > 0:
-            t = threading.Thread(target=self._timeout_monitor, name="dds-inject-timeout", daemon=True)
-            t.start()
+            self._timeout_thread = threading.Thread(target=self._timeout_monitor, name="dds-inject-timeout", daemon=True)
+            self._timeout_thread.start()
 
         # 启动重连线程
-        t = threading.Thread(target=self._reconnect_loop, name="dds-reconnect", daemon=True)
-        t.start()
+        self._reconnect_thread = threading.Thread(target=self._reconnect_loop, name="dds-reconnect", daemon=True)
+        self._reconnect_thread.start()
 
     def _on_message(self, msg: Any) -> None:
         """DDS 消息回调 (由 unitree_sdk2py 在内部线程触发)."""
@@ -173,7 +179,7 @@ class DdsCommandInjector:
                 self._pending["wz"] = yaw
                 self._last_msg_time = _time.time()
         except Exception as e:
-            print(f"[DDS-INJECT] 消息处理失败: {e}")
+            logger.warning("消息处理失败: %s", e)
 
     def _reconnect_loop(self) -> None:
         """后台线程: 检测订阅断开并重连 (指数退避).
@@ -190,10 +196,10 @@ class DdsCommandInjector:
             if self._subscriber is None:
                 attempt += 1
                 if self._max_reconnect_attempts > 0 and attempt > self._max_reconnect_attempts:
-                    print(f"[DDS-INJECT] ❌ 重连次数已达上限 ({self._max_reconnect_attempts}), 停止重连")
+                    logger.error("重连次数已达上限 (%d), 停止重连", self._max_reconnect_attempts)
                     break
-                backoff = min(self._reconnect_interval * (2 ** (attempt - 1)), 60.0)
-                print(f"[DDS-INJECT] 🔄 尝试重连 ({attempt}): {self._topic} (等待 {backoff:.1f}s)")
+                backoff = min(self._reconnect_interval * (2 ** (attempt - 1)), _RECONNECT_BACKOFF_MAX)
+                logger.info("尝试重连 (%d): %s (等待 %.1fs)", attempt, self._topic, backoff)
                 _time.sleep(backoff)
                 success = self._do_subscribe()
                 if success:
@@ -201,7 +207,7 @@ class DdsCommandInjector:
 
     def _timeout_monitor(self) -> None:
         """监控 DDS 消息超时, 超时后归零."""
-        check_interval = max(self._timeout_s * 0.5, 0.1)
+        check_interval = max(self._timeout_s * 0.5, _TIMEOUT_CHECK_INTERVAL_MIN)
         while self._running:
             _time.sleep(check_interval)
             if not self._running:
@@ -219,7 +225,7 @@ class DdsCommandInjector:
                         self._pending["vx"] = 0.0
                         self._pending["vy"] = 0.0
                         self._pending["wz"] = 0.0
-                        print(f"[DDS-INJECT] ⚠️ DDS 超时 ({elapsed:.1f}s), 已归零")
+                        logger.warning("DDS 超时 (%.1fs), 已归零", elapsed)
 
     def inject(self) -> None:
         """在 env.step() 前调用, 把 _pending 写入 env vel_command_b."""
@@ -254,8 +260,15 @@ class DdsCommandInjector:
             return dict(self._pending)
 
     def stop(self) -> None:
-        """停止超时线程."""
+        """停止后台线程并释放资源."""
         self._running = False
+        if self._timeout_thread is not None and self._timeout_thread.is_alive():
+            self._timeout_thread.join(timeout=1.0)
+        if self._reconnect_thread is not None and self._reconnect_thread.is_alive():
+            self._reconnect_thread.join(timeout=1.0)
+        self._subscriber = None
+        self._timeout_thread = None
+        self._reconnect_thread = None
 
 
 __all__ = ["DdsCommandInjector", "WirelessController_"]

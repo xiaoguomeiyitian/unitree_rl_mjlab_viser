@@ -31,9 +31,14 @@ if UNITREE_RL_MJLAB_SRC.is_dir():
     sys.path.insert(0, str(UNITREE_RL_MJLAB_SRC))
 sys.modules.pop("src", None)
 
-from unitree_sdk2py.core.channel import ChannelFactoryInitialize, ChannelPublisher  # noqa: E402
-from unitree_sdk2py.idl.unitree_go.msg.dds_ import WirelessController_  # noqa: E402
-from unitree_sdk2py.idl.default import unitree_go_msg_dds__WirelessController_  # noqa: E402
+import pytest
+
+try:
+    from unitree_sdk2py.core.channel import ChannelFactoryInitialize, ChannelPublisher  # noqa: E402
+    from unitree_sdk2py.idl.unitree_go.msg.dds_ import WirelessController_  # noqa: E402
+    from unitree_sdk2py.idl.default import unitree_go_msg_dds__WirelessController_  # noqa: E402
+except ImportError as e:
+    pytest.skip(f"unitree_sdk2py 不可用: {e}", allow_module_level=True)
 
 
 TOPIC = "rt/test_e2e/wirelesscontroller"
